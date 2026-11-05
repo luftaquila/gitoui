@@ -514,6 +514,22 @@ impl<'a> View<'a> {
         }
     }
 
+    pub fn on_panel_edge(&self, col: u16, row: u16) -> bool {
+        self.main_areas()
+            .and_then(|a| a.panel)
+            .is_some_and(|p| row == p.y && col >= p.x && col < p.right())
+    }
+
+    /// Last-render areas of a view laid out around the commit list.
+    pub fn main_areas(&self) -> Option<crate::view::MainAreas> {
+        let list_state = match self {
+            View::List(view) => view.as_list_state(),
+            View::Detail(view) => view.as_list_state(),
+            _ => return None,
+        };
+        list_state.workspace.areas
+    }
+
     /// Wheel over a detail panel scrolls the part under the pointer; false
     /// falls back to the usual scroll event.
     pub fn handle_wheel(&mut self, col: u16, row: u16, down: bool) -> bool {

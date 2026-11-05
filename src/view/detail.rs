@@ -1,4 +1,7 @@
-use std::rc::Rc;
+use std::{
+    rc::Rc,
+    sync::atomic::{AtomicU16, Ordering},
+};
 
 use ratatui::{
     crossterm::event::KeyEvent,
@@ -19,17 +22,66 @@ use crate::{
     widget::{
         commit_detail::{
             change_path, change_rows, sort_changes_for_tree, CommitDetail, CommitDetailState,
+            PanelFocus,
         },
         commit_list::{CommitList, CommitListState},
     },
 };
 
+/// Panel height chosen this session (keys / drag); 0 = not chosen.
+static PANEL_HEIGHT: AtomicU16 = AtomicU16::new(0);
+/// Height the last split gave the panel, and the most it could have had:
+/// the base and the limit for grow / shrink.
+static LAST_PANEL_HEIGHT: AtomicU16 = AtomicU16::new(0);
+static MAX_PANEL_HEIGHT: AtomicU16 = AtomicU16::new(u16::MAX);
+const MIN_PANEL_HEIGHT: u16 = 5;
+
 /// Commit list on top, detail panel below. Shared by the Detail view and
 /// the List view's preview, so switching keeps the list in place.
 pub(crate) fn split_list_detail(ctx: &AppContext, area: Rect) -> [Rect; 2] {
-    let detail_height =
-        crate::view::adaptive_detail_height(area.height, ctx.ui_config.detail.height, 5);
+    let chosen = match PANEL_HEIGHT.load(Ordering::Relaxed) {
+        0 => ctx.ui_config.detail.panel_height,
+        h => h,
+    };
+    // Leave a few commit rows, keep a usable panel.
+    let max_height = area
+        .height
+        .saturating_sub(5)
+        .max(MIN_PANEL_HEIGHT.min(area.height));
+    let detail_height = if chosen > 0 {
+        chosen.min(max_height)
+    } else {
+        crate::view::adaptive_detail_height(area.height, ctx.ui_config.detail.height, 5)
+    };
+    LAST_PANEL_HEIGHT.store(detail_height, Ordering::Relaxed);
+    MAX_PANEL_HEIGHT.store(max_height, Ordering::Relaxed);
     Layout::vertical([Constraint::Min(0), Constraint::Length(detail_height)]).areas(area)
+}
+
+/// Clamped to the screen at the next layout.
+pub(crate) fn set_panel_height(height: u16) {
+    PANEL_HEIGHT.store(height.max(MIN_PANEL_HEIGHT), Ordering::Relaxed);
+}
+
+pub(crate) fn persist_panel_height() {
+    let height = PANEL_HEIGHT.load(Ordering::Relaxed);
+    if height > 0 {
+        let _ = crate::config::save_detail_panel_height(height);
+    }
+}
+
+/// `panel_grow` / `panel_shrink`. Builds on a height set earlier in the
+/// same input batch (not drawn yet).
+pub(crate) fn resize_panel(delta: i16) {
+    let max = MAX_PANEL_HEIGHT.load(Ordering::Relaxed);
+    let current = match PANEL_HEIGHT.load(Ordering::Relaxed) {
+        0 => LAST_PANEL_HEIGHT.load(Ordering::Relaxed),
+        h => h.min(max),
+    };
+    let target = (current as i32 + delta as i32)
+        .clamp(MIN_PANEL_HEIGHT as i32, max.max(MIN_PANEL_HEIGHT) as i32);
+    set_panel_height(target as u16);
+    persist_panel_height();
 }
 
 /// Delete Kitty graph placements left on rows the moved panel now covers.
@@ -201,6 +253,7 @@ pub(crate) fn render_detail_panel(
     changes: &[FileChange],
     state: &mut CommitDetailState,
     diff: &mut DiffPane<'_>,
+    focus: PanelFocus,
 ) -> Rect {
     if !ctx.ui_config.detail.diff_pane {
         diff.area = None;
@@ -212,7 +265,11 @@ pub(crate) fn render_detail_panel(
     let [main_area, hint_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
     let [info_area, diff_area] = split_panel(main_area);
-    f.render_stateful_widget(widget.with_actions(false), info_area, state);
+    f.render_stateful_widget(
+        widget.with_actions(false).with_focus(focus),
+        info_area,
+        state,
+    );
     f.render_widget(
         ratatui::widgets::Paragraph::new(hint).block(
             ratatui::widgets::Block::default().padding(ratatui::widgets::Padding::horizontal(1)),
@@ -221,6 +278,16 @@ pub(crate) fn render_detail_panel(
     );
     diff.sync(ctx, tx, commit, changes, state.selected_file);
     diff.render(f, diff_area);
+    if focus == PanelFocus::Diff && diff.view.is_some() {
+        // The diff's top rule, accented while the diff has focus.
+        let accent = ratatui::style::Style::default()
+            .fg(ctx.color_theme.list_head_fg)
+            .add_modifier(ratatui::style::Modifier::BOLD);
+        let buf = f.buffer_mut();
+        for x in diff_area.left()..diff_area.right() {
+            buf[(x, diff_area.y)].set_style(accent);
+        }
+    }
     info_area
 }
 
@@ -325,6 +392,7 @@ impl<'a> DetailPreview<'a> {
             &self.changes,
             &mut self.state,
             &mut self.diff,
+            PanelFocus::None,
         ));
     }
 
@@ -361,6 +429,8 @@ pub struct DetailView<'a> {
     /// Info / files part of `detail_area` (all of it without the diff pane).
     info_area: Option<Rect>,
     diff_pane: DiffPane<'a>,
+    /// Files or diff; the commit list never has focus in this view.
+    focus: PanelFocus,
     cleared_detail_area: Option<Rect>,
 }
 
@@ -390,6 +460,7 @@ impl<'a> DetailView<'a> {
             detail_area: None,
             info_area: None,
             diff_pane: DiffPane::default(),
+            focus: PanelFocus::Files,
             cleared_detail_area: None,
         }
     }
@@ -433,7 +504,44 @@ impl<'a> DetailView<'a> {
             return;
         }
 
+        match event {
+            UserEvent::PanelGrow => return resize_panel(2),
+            UserEvent::PanelShrink => return resize_panel(-2),
+            // Tab: switch focus between the files and the diff.
+            UserEvent::RefList if self.ctx.ui_config.detail.diff_pane => {
+                self.focus = match self.focus {
+                    PanelFocus::Diff => PanelFocus::Files,
+                    _ => PanelFocus::Diff,
+                };
+                return;
+            }
+            _ => {}
+        }
+
         let diff_pane = self.ctx.ui_config.detail.diff_pane;
+        if diff_pane && self.focus == PanelFocus::Diff {
+            match event {
+                // Moving and jumping act on the diff while it has focus.
+                UserEvent::NavigateDown
+                | UserEvent::NavigateUp
+                | UserEvent::GoToTop
+                | UserEvent::GoToBottom
+                | UserEvent::PageDown
+                | UserEvent::PageUp
+                | UserEvent::HalfPageDown
+                | UserEvent::HalfPageUp
+                | UserEvent::ScrollDown
+                | UserEvent::ScrollUp => {
+                    self.diff_pane.scroll(event_with_count, key);
+                    return;
+                }
+                UserEvent::Cancel => {
+                    self.focus = PanelFocus::Files;
+                    return;
+                }
+                _ => {}
+            }
+        }
 
         // With the diff pane, paging scrolls the diff; the file list
         // follows the selection.
@@ -504,7 +612,10 @@ impl<'a> DetailView<'a> {
                 self.commit_detail_state.select_first();
             }
             UserEvent::GoToBottom => {
+                // Last file selected (scrolled into view), not only scrolled.
                 self.commit_detail_state.select_last();
+                self.commit_detail_state
+                    .select_last_file(self.changes.len());
             }
             UserEvent::SelectDown => {
                 self.tx.send(AppEvent::SelectOlderCommit);
@@ -675,8 +786,9 @@ impl<'a> DetailView<'a> {
 
         let ctx = self.ctx.clone();
         let list_state = self.commit_list_state.as_mut().unwrap();
-        let commit_list = CommitList::new(ctx.clone());
+        let commit_list = CommitList::new(ctx.clone()).with_focus(Some(false));
         f.render_stateful_widget(commit_list, areas.list, list_state);
+        list_state.workspace.areas = Some(areas);
 
         let commit_detail = CommitDetail::new(
             &self.commit,
@@ -697,6 +809,7 @@ impl<'a> DetailView<'a> {
             &self.changes,
             &mut self.commit_detail_state,
             &mut self.diff_pane,
+            self.focus,
         );
         self.info_area = Some(info_area);
     }
@@ -825,8 +938,9 @@ impl<'a> DetailView<'a> {
         }
 
         if self.ctx.ui_config.detail.diff_pane {
-            // Diff pane on the right: nothing clickable there yet.
+            // A click on the diff pane focuses it.
             if self.info_area.is_some_and(|a| col >= a.right()) {
+                self.focus = PanelFocus::Diff;
                 return;
             }
         } else {
@@ -842,6 +956,7 @@ impl<'a> DetailView<'a> {
         }
 
         if let Some(file_idx) = self.file_at_row(row as u16) {
+            self.focus = PanelFocus::Files;
             self.commit_detail_state.selected_file = file_idx;
             // With the diff pane the click already shows the diff beside.
             if !self.ctx.ui_config.detail.diff_pane {

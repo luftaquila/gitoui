@@ -1789,6 +1789,9 @@ impl<'a> CommitListState<'a> {
 pub struct CommitList<'a> {
     ctx: Rc<AppContext>,
     _marker: std::marker::PhantomData<&'a ()>,
+    /// Keyboard focus, when a detail panel shares the screen: `Some(true)`
+    /// accents the column header, `Some(false)` dims the selected row.
+    focus: Option<bool>,
 }
 
 impl<'a> CommitList<'a> {
@@ -1796,6 +1799,22 @@ impl<'a> CommitList<'a> {
         Self {
             ctx,
             _marker: std::marker::PhantomData,
+            focus: None,
+        }
+    }
+
+    pub fn with_focus(mut self, focus: Option<bool>) -> Self {
+        self.focus = focus;
+        self
+    }
+
+    /// (bg, fg) of the selected row.
+    fn selected_colors(&self) -> (Color, Color) {
+        let theme = &self.ctx.color_theme;
+        if self.focus == Some(false) {
+            (theme.inactive_selected_bg(), theme.fg)
+        } else {
+            (theme.list_selected_bg, theme.list_selected_fg)
         }
     }
 }
@@ -2136,9 +2155,14 @@ impl CommitList<'_> {
             let text = column_header_text(col_type, avatars_enabled);
 
             if !text.is_empty() {
-                let style = Style::default()
-                    .fg(self.ctx.color_theme.list_ref_paren_fg)
-                    .add_modifier(Modifier::BOLD);
+                // Accented while the list has focus and a detail panel
+                // shares the screen.
+                let fg = if self.focus == Some(true) {
+                    self.ctx.color_theme.list_head_fg
+                } else {
+                    self.ctx.color_theme.list_ref_paren_fg
+                };
+                let style = Style::default().fg(fg).add_modifier(Modifier::BOLD);
                 let line = Line::from(Span::styled(text.to_string(), style));
                 let para = Paragraph::new(line);
                 let text_area = Rect::new(chunks[i].x, chunks[i].y, chunks[i].width, 1);
@@ -2417,7 +2441,7 @@ impl CommitList<'_> {
                     && state.hovered_branch.is_none()
                     && state.hovered_tag.is_none()
                 {
-                    ListItem::new(Line::from(span).bg(self.ctx.color_theme.list_selected_bg))
+                    ListItem::new(Line::from(span).bg(self.selected_colors().0))
                 } else {
                     ListItem::new(span)
                 }
@@ -2958,9 +2982,8 @@ impl CommitList<'_> {
             && state.hovered_branch.is_none()
             && state.hovered_tag.is_none()
         {
-            line = line
-                .bg(self.ctx.color_theme.list_selected_bg)
-                .fg(self.ctx.color_theme.list_selected_fg);
+            let (bg, fg) = self.selected_colors();
+            line = line.bg(bg).fg(fg);
         }
         ListItem::new(line)
     }

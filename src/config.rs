@@ -502,6 +502,8 @@ pub struct UiCommonConfig {
     pub cursor_type: CursorType,
     #[default = true]
     pub mouse_enabled: bool,
+    #[default = false]
+    pub mouse_hover: bool,
     #[default(DiffMode::Enhanced)]
     pub diff_mode: DiffMode,
     #[default(ConflictViewMode::TwoPane)]
@@ -619,6 +621,43 @@ pub struct UiDetailConfig {
     #[garde(skip)]
     #[default = false]
     pub diff_pane: bool,
+    /// 0 sizes the panel from `height`. Written by `panel_grow` /
+    /// `panel_shrink` and by dragging the panel's top edge.
+    #[garde(skip)]
+    #[default = 0]
+    pub panel_height: u16,
+}
+
+/// Set `[ui.detail] panel_height` in the loaded config file, keeping the rest.
+pub fn save_detail_panel_height(height: u16) -> std::result::Result<(), String> {
+    let path = resolve_config_file_path().ok_or("Could not determine config path")?;
+    let mut doc = if path.exists() {
+        std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read config: {}", e))?
+            .parse::<toml::Table>()
+            .map_err(|e| format!("Failed to parse config: {}", e))?
+    } else {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create config directory: {}", e))?;
+        }
+        toml::Table::new()
+    };
+    let ui = doc
+        .entry("ui")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    let detail = ui
+        .as_table_mut()
+        .ok_or("[ui] is not a table")?
+        .entry("detail")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    detail
+        .as_table_mut()
+        .ok_or("[ui.detail] is not a table")?
+        .insert("panel_height".into(), toml::Value::Integer(height.into()));
+    let toml_string =
+        toml::to_string_pretty(&doc).map_err(|e| format!("Failed to serialize config: {}", e))?;
+    std::fs::write(&path, toml_string).map_err(|e| format!("Failed to write config: {}", e))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]

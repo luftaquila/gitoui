@@ -8,6 +8,7 @@ use crate::{
     event::{AppEvent, Sender, UserEvent, UserEventWithCount},
     git::CommitHash,
     view::{
+        detail::resize_panel,
         workspace::{main_areas, preview_on},
         ListRefreshViewContext, MainAreas, RefreshViewContext,
     },
@@ -168,6 +169,8 @@ impl<'a> ListView<'a> {
                 UserEvent::MarkCompare => {
                     self.handle_mark_compare();
                 }
+                UserEvent::PanelGrow => resize_panel(2),
+                UserEvent::PanelShrink => resize_panel(-2),
                 UserEvent::Confirm => {
                     if let SearchState::Applied { .. } = self.as_list_state().search_state() {
                         self.as_mut_list_state().cancel_search();
@@ -311,13 +314,16 @@ impl<'a> ListView<'a> {
         let ctx = self.ctx.clone();
         let tx = self.tx.clone();
         let list_state = self.commit_list_state.as_mut().unwrap();
-        let commit_list = CommitList::new(ctx.clone());
+        // With the preview panel on screen, accent the list while it has focus.
+        let shared = areas.panel.is_some();
+        let commit_list = CommitList::new(ctx.clone()).with_focus(shared.then_some(true));
         f.render_stateful_widget(commit_list, areas.list, list_state);
         if let Some(panel_area) = areas.panel {
             list_state
                 .workspace
                 .render_preview(f, panel_area, &ctx, &tx);
         }
+        list_state.workspace.areas = Some(areas);
     }
 
     pub fn update_layout(&mut self, area: Rect) {

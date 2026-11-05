@@ -13,7 +13,7 @@ use crate::{
     view::detail::{clear_rows_under, split_list_detail, DetailPreview},
 };
 
-/// Where the commit list and the detail panel go.
+/// Where the last render put the commit list and the detail panel.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MainAreas {
     pub list: Rect,
@@ -41,6 +41,8 @@ pub struct Workspace<'a> {
     /// Recently shown previews, oldest first.
     preview_cache: Vec<DetailPreview<'a>>,
     cleared_detail_area: Option<Rect>,
+    /// Areas of the last render, for routing mouse clicks to a window.
+    pub(crate) areas: Option<MainAreas>,
 }
 
 impl<'a> Workspace<'a> {

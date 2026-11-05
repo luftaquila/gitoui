@@ -1167,6 +1167,9 @@ pub enum UserEvent {
     // Diff view file cycling
     CycleFileNext,
     CycleFilePrev,
+    // Detail panel height
+    PanelGrow,
+    PanelShrink,
     // Branch upstream
     SetUpstream,
     // Abort in-progress rebase/merge/cherry-pick
@@ -1288,6 +1291,8 @@ impl<'de> Deserialize<'de> for UserEvent {
                         "copy_stash_hash" => Ok(UserEvent::CopyStashHash),
                         "cycle_file_next" => Ok(UserEvent::CycleFileNext),
                         "cycle_file_prev" => Ok(UserEvent::CycleFilePrev),
+                        "panel_grow" => Ok(UserEvent::PanelGrow),
+                        "panel_shrink" => Ok(UserEvent::PanelShrink),
                         "set_upstream" => Ok(UserEvent::SetUpstream),
                         "abort_operation" => Ok(UserEvent::AbortOperation),
                         "amend_commit" => Ok(UserEvent::AmendCommit),

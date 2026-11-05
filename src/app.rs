@@ -322,6 +322,8 @@ pub struct App<'a> {
     /// it after each handler returns and exits with `Ok(Ret::Refresh(req))`,
     /// the same path the keyboard Enter takes.
     pending_refresh: Option<RefreshRequest>,
+    /// Dragging the detail panel's top edge.
+    panel_drag: bool,
     /// Transient "this dir isn't a git repo" message shown in the footer
     /// left (replacing "Changing directory…") for ~2 seconds when the user
     /// tries to commit a non-git target. Auto-clears once `Instant::elapsed`
@@ -631,6 +633,7 @@ impl<'a> App<'a> {
             dir_dropdown_area: None,
             dir_input_cursor_anchor: None,
             pending_refresh: None,
+            panel_drag: false,
             dir_error_message: None,
             pr_nav_stack: Vec::new(),
             dir_recents: {
@@ -3429,6 +3432,15 @@ impl App<'_> {
                         .view
                         .diff_footer_hint()
                         .unwrap_or_else(|| format!("⌘ {}", g(UserEvent::FullCopy, "copy-path"))),
+                    View::Detail(_) if self.ctx.ui_config.detail.diff_pane => format!(
+                        "⌘ ⇆:prev/next▕▏{}▕▏{}/{}▕▏{}▕▏{}▕▏{}",
+                        g(UserEvent::RefList, "files/diff"),
+                        g(UserEvent::PanelGrow, "taller"),
+                        g(UserEvent::PanelShrink, "shorter"),
+                        g(UserEvent::FileHistory, "history"),
+                        g(UserEvent::FullCopy, "msg"),
+                        g(UserEvent::ShortCopy, "hash"),
+                    ),
                     View::Detail(_) => format!(
                         "⌘ ⇆:prev/next▕▏{}▕▏{}▕▏{}▕▏{}",
                         g(UserEvent::FileHistory, "history"),
@@ -6262,6 +6274,10 @@ impl<'a> App<'a> {
                     // nothing, explicitly NOT propagating to view.handle_click.
                     return Ok(true);
                 }
+                if self.view.on_panel_edge(mouse.column, mouse.row) {
+                    self.panel_drag = true;
+                    return Ok(true);
+                }
                 if mouse.modifiers.contains(KeyModifiers::CONTROL) {
                     self.view.handle_shift_click(mouse.column, mouse.row);
                 } else {
@@ -6272,6 +6288,7 @@ impl<'a> App<'a> {
                 self.apply_live_config_theme();
                 true
             }
+            MouseEventKind::Moved if !self.ctx.ui_config.common.mouse_hover => false,
             MouseEventKind::Moved => {
                 if self.dir_input.active {
                     // Overlay owns hover: highlight the dropdown row under
@@ -6283,6 +6300,18 @@ impl<'a> App<'a> {
                     return Ok(true);
                 }
                 self.view.handle_mouse_move(mouse.column, mouse.row)
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.panel_drag => {
+                // The panel's top edge follows the pointer.
+                let area: Rect = terminal.size()?.into();
+                let [_, view_area, _, _] = split_app_areas_with_header(area);
+                crate::view::set_panel_height(view_area.bottom().saturating_sub(mouse.row));
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.panel_drag => {
+                self.panel_drag = false;
+                crate::view::persist_panel_height();
+                true
             }
             _ => false,
         };

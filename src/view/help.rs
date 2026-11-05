@@ -513,6 +513,13 @@ fn sections(kb: &KeyBinds) -> Vec<HelpSection> {
                 sg(kb, UserEvent::GoToParent, "Go to parent commit"),
                 sg(kb, UserEvent::GoToTop, "Go to top"),
                 sg(kb, UserEvent::GoToBottom, "Go to bottom"),
+                sg(
+                    kb,
+                    UserEvent::PanelGrow,
+                    "Taller detail panel (or drag its edge)",
+                ),
+                sg(kb, UserEvent::PanelShrink, "Shorter detail panel"),
+                sg(kb, UserEvent::RefList, "Detail: switch focus files / diff"),
                 sg(kb, UserEvent::SelectMiddle, "Select middle of viewport"),
                 sg(kb, UserEvent::SelectBottom, "Select bottom of viewport"),
                 sg(kb, UserEvent::ScrollDown, "Scroll one line down"),
