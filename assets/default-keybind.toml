@@ -111,6 +111,10 @@ copy_stash_hash = ["ctrl-o"]
 cycle_file_next = ["+"]
 cycle_file_prev = ["-"]
 
+# Detail panel under the commit list: taller / shorter (also drag its top edge)
+panel_grow = ["]"]
+panel_shrink = ["["]
+
 # Abort in-progress rebase/merge/cherry-pick
 abort_operation = ["ctrl-a"]
 

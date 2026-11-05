@@ -218,6 +218,11 @@
                 "raw"
               ],
               "default": "enhanced"
+            },
+            "mouse_hover": {
+              "type": "boolean",
+              "description": "React to the pointer passing over items (hover highlight, hover-to-select). Off: the mouse acts on clicks and the wheel only.",
+              "default": false
             }
           },
           "additionalProperties": false
@@ -303,6 +308,11 @@
               "type": "boolean",
               "description": "Show the selected file's diff beside the changed files.",
               "default": false
+            },
+            "panel_height": {
+              "type": "integer",
+              "description": "Rows of the detail panel under the commit list; 0 sizes it automatically. Changed by panel_grow / panel_shrink or by dragging the panel's top edge.",
+              "default": 0
             }
           },
           "additionalProperties": false

@@ -79,6 +79,10 @@ impl CommitDetailState {
         self.offset = usize::MAX;
     }
 
+    pub fn select_last_file(&mut self, total: usize) {
+        self.selected_file = total.saturating_sub(1);
+    }
+
     pub fn select_next_file(&mut self, total: usize) {
         if total == 0 {
             return;
@@ -119,6 +123,16 @@ pub struct CommitDetail<'a> {
     pr_origin: Option<u64>,
     /// Off when the diff pane takes the git-actions column's place.
     show_actions: bool,
+    focus: PanelFocus,
+}
+
+/// Focused part of a detail panel; `None` when the commit list has focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PanelFocus {
+    #[default]
+    None,
+    Files,
+    Diff,
 }
 
 impl<'a> CommitDetail<'a> {
@@ -139,7 +153,13 @@ impl<'a> CommitDetail<'a> {
             is_head_commit,
             pr_origin: None,
             show_actions: true,
+            focus: PanelFocus::None,
         }
+    }
+
+    pub fn with_focus(mut self, focus: PanelFocus) -> Self {
+        self.focus = focus;
+        self
     }
 
     /// Attach a PR origin to the widget so the title row reads
@@ -462,12 +482,17 @@ impl CommitDetail<'_> {
             .style(text)
             .wrap(Wrap { trim: false })
             .render(info_area, buf);
-        // "── Changes (N) ───"
+        // "── Changes (N) ───", accented while the files have focus.
         let theme = &self.ctx.color_theme;
-        let (label_style, rule_style) = (
-            Style::default().fg(theme.detail_label_fg),
-            Style::default().fg(theme.divider_fg),
-        );
+        let (label_style, rule_style) = if self.focus == PanelFocus::Files {
+            let accent = Style::default().fg(theme.list_head_fg);
+            (accent.add_modifier(Modifier::BOLD), accent)
+        } else {
+            (
+                Style::default().fg(theme.detail_label_fg),
+                Style::default().fg(theme.divider_fg),
+            )
+        };
         let label = format!(" Changes ({}) ", self.changes.len());
         let rest = (divider_area.width as usize).saturating_sub(label.chars().count() + 2);
         Paragraph::new(Line::from(vec![
@@ -486,7 +511,11 @@ impl CommitDetail<'_> {
         let highlight_file = state.hover_file.unwrap_or(state.selected_file);
         if let Some(line) = lines.get_mut(file_line(highlight_file)) {
             if !self.changes.is_empty() {
-                line.style = Style::default().add_modifier(Modifier::REVERSED);
+                line.style = if self.focus == PanelFocus::Files {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default().bg(theme.inactive_selected_bg())
+                };
             }
         }
         let visible: Vec<Line> = lines.into_iter().skip(state.offset).collect();

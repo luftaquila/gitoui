@@ -113,6 +113,19 @@ pub struct ColorTheme {
     pub graph_branches: Vec<String>,
 }
 
+impl ColorTheme {
+    /// Selection colour of an unfocused pane.
+    pub fn inactive_selected_bg(&self) -> RatatuiColor {
+        match (self.bg, self.list_selected_bg) {
+            (RatatuiColor::Rgb(r1, g1, b1), RatatuiColor::Rgb(r2, g2, b2)) => {
+                let mid = |a: u8, b: u8| ((a as u16 + b as u16) / 2) as u8;
+                RatatuiColor::Rgb(mid(r1, r2), mid(g1, g2), mid(b1, b2))
+            }
+            _ => self.list_selected_bg,
+        }
+    }
+}
+
 impl OptionalColorTheme {
     /// Merge user-provided partial overrides onto an already-built base
     /// `ColorTheme` (the inherited theme, NOT the default). Every token
