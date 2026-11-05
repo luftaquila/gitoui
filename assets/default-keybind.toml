@@ -115,6 +115,12 @@ cycle_file_prev = ["-"]
 panel_grow = ["]"]
 panel_shrink = ["["]
 
+# Move between windows: refs sidebar, commit list, changed files, diff
+focus_left = ["ctrl-h"]
+focus_down = ["ctrl-j"]
+focus_up = ["ctrl-k"]
+focus_right = ["ctrl-l"]
+
 # Abort in-progress rebase/merge/cherry-pick
 abort_operation = ["ctrl-a"]
 

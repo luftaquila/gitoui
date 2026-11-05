@@ -5,7 +5,8 @@ use ratatui::{crossterm::event::KeyEvent, layout::Rect, Frame};
 use crate::{
     app::AppContext,
     event::{AppEvent, DialogKind, Sender, UserEvent, UserEventWithCount},
-    widget::commit_list::{CommitList, CommitListState},
+    view::workspace::{layout_with_panel, render_list_and_sidebar},
+    widget::commit_list::CommitListState,
     widget::tag_detail::{TagDetail, TagDetailState, TagMetadata},
 };
 
@@ -104,21 +105,18 @@ impl<'a> TagDetailView<'a> {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
-        let detail_height = if self.commit_list_state.is_some() {
-            crate::view::adaptive_detail_height(area.height, 10, 5)
-        } else {
-            area.height.min(10)
+        // The List view's layout, with the tag in the panel.
+        let areas = layout_with_panel(&self.ctx, area, self.commit_list_state.as_ref());
+        let detail_area = match self.commit_list_state {
+            Some(ref mut list_state) => {
+                render_list_and_sidebar(f, &self.ctx, areas, list_state);
+                areas.panel.unwrap_or(area)
+            }
+            None => Rect {
+                height: area.height.min(10),
+                ..area
+            },
         };
-        let [list_area, detail_area] = ratatui::layout::Layout::vertical([
-            ratatui::layout::Constraint::Min(0),
-            ratatui::layout::Constraint::Length(detail_height),
-        ])
-        .areas(area);
-
-        if let Some(ref mut list_state) = self.commit_list_state {
-            let commit_list = CommitList::new(self.ctx.clone());
-            f.render_stateful_widget(commit_list, list_area, list_state);
-        }
 
         let tag_detail = TagDetail::new(&self.metadata, self.ctx.clone());
         f.render_stateful_widget(tag_detail, detail_area, &mut self.tag_detail_state);
@@ -126,15 +124,21 @@ impl<'a> TagDetailView<'a> {
     }
 
     pub fn update_layout(&mut self, area: Rect) {
+        let areas = layout_with_panel(&self.ctx, area, self.commit_list_state.as_ref());
         if let Some(ref mut list_state) = self.commit_list_state {
-            let detail_height = crate::view::adaptive_detail_height(area.height, 10, 5);
-            let [list_area, _] = ratatui::layout::Layout::vertical([
-                ratatui::layout::Constraint::Min(0),
-                ratatui::layout::Constraint::Length(detail_height),
-            ])
-            .areas(area);
-            list_state.update_height(list_area.height as usize);
+            if let Some(panel) = areas.panel {
+                list_state.workspace.clear_rows_under(&self.ctx, panel);
+            }
+            list_state.update_height(areas.list.height as usize);
         }
+    }
+
+    pub fn list_state(&self) -> Option<&CommitListState<'a>> {
+        self.commit_list_state.as_ref()
+    }
+
+    pub fn list_state_mut(&mut self) -> Option<&mut CommitListState<'a>> {
+        self.commit_list_state.as_mut()
     }
 
     pub fn handle_click(&mut self, col: u16, row: u16) {

@@ -504,6 +504,8 @@ pub struct UiCommonConfig {
     pub mouse_enabled: bool,
     #[default = false]
     pub mouse_hover: bool,
+    #[default = false]
+    pub tmux_navigation: bool,
     #[default(DiffMode::Enhanced)]
     pub diff_mode: DiffMode,
     #[default(ConflictViewMode::TwoPane)]
@@ -685,6 +687,9 @@ pub struct UiRefsConfig {
     #[garde(skip)]
     #[default(RefsPosition::Right)]
     pub position: RefsPosition,
+    #[garde(skip)]
+    #[default = false]
+    pub always_open: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]

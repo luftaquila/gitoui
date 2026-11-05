@@ -887,7 +887,12 @@ impl<'a> DetailView<'a> {
                 f.render_stateful_widget(commit_list, areas.list, self.as_mut_list_state());
             }
         }
-        self.as_mut_list_state().workspace.areas = Some(areas);
+        let ctx = self.ctx.clone();
+        let list_state = self.as_mut_list_state();
+        if let (Some(refs_area), Some(refs)) = (areas.refs, list_state.workspace.refs.as_mut()) {
+            refs.render(f, refs_area, &ctx, false);
+        }
+        list_state.workspace.areas = Some(areas);
 
         let commit_detail = CommitDetail::new(
             &self.commit,
@@ -986,7 +991,21 @@ impl<'a> DetailView<'a> {
 
     /// The List view's layout with its preview panel.
     fn layout(&self, area: Rect) -> MainAreas {
-        main_areas(&self.ctx, area, true)
+        let list_state = self.as_list_state();
+        let refs = if self.ctx.ui_config.refs.always_open {
+            list_state.workspace.refs.as_ref()
+        } else {
+            None
+        };
+        main_areas(&self.ctx, area, refs, true)
+    }
+
+    pub fn focus(&self) -> PanelFocus {
+        self.focus
+    }
+
+    pub fn set_focus(&mut self, focus: PanelFocus) {
+        self.focus = focus;
     }
 
     pub fn select_older_commit(&mut self, repository: &Repository) {
@@ -1145,7 +1164,10 @@ impl<'a> DetailView<'a> {
             self.info_area,
             &mut self.commit_detail_state,
             &mut self.diff_pane,
-        )
+        ) || self
+            .as_mut_list_state()
+            .workspace
+            .handle_wheel(col, row, down)
     }
 
     fn action_index_at_row(&self, action_bar_row: usize) -> Option<usize> {

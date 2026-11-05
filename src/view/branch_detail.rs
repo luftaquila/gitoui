@@ -5,8 +5,9 @@ use ratatui::{crossterm::event::KeyEvent, layout::Rect, Frame};
 use crate::{
     app::AppContext,
     event::{AppEvent, DialogKind, GitAction, Sender, UserEvent, UserEventWithCount},
+    view::workspace::{layout_with_panel, render_list_and_sidebar},
     widget::branch_detail::{BranchDetail, BranchDetailState, BranchMetadata},
-    widget::commit_list::{CommitList, CommitListState},
+    widget::commit_list::CommitListState,
 };
 
 #[derive(Debug)]
@@ -148,17 +149,12 @@ impl<'a> BranchDetailView<'a> {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
-        let detail_height = crate::view::adaptive_detail_height(area.height, 12, 5);
-        let [list_area, detail_area] = ratatui::layout::Layout::vertical([
-            ratatui::layout::Constraint::Min(0),
-            ratatui::layout::Constraint::Length(detail_height),
-        ])
-        .areas(area);
-
+        // The List view's layout, with the branch in the panel.
+        let areas = layout_with_panel(&self.ctx, area, self.commit_list_state.as_ref());
         if let Some(ref mut list_state) = self.commit_list_state {
-            let commit_list = CommitList::new(self.ctx.clone());
-            f.render_stateful_widget(commit_list, list_area, list_state);
+            render_list_and_sidebar(f, &self.ctx, areas, list_state);
         }
+        let detail_area = areas.panel.unwrap_or(area);
 
         let branch_detail = BranchDetail::new(&self.metadata, self.ctx.clone());
         f.render_stateful_widget(branch_detail, detail_area, &mut self.branch_detail_state);
@@ -166,15 +162,21 @@ impl<'a> BranchDetailView<'a> {
     }
 
     pub fn update_layout(&mut self, area: Rect) {
-        let detail_height = crate::view::adaptive_detail_height(area.height, 12, 5);
-        let [list_area, _] = ratatui::layout::Layout::vertical([
-            ratatui::layout::Constraint::Min(0),
-            ratatui::layout::Constraint::Length(detail_height),
-        ])
-        .areas(area);
+        let areas = layout_with_panel(&self.ctx, area, self.commit_list_state.as_ref());
         if let Some(ref mut list_state) = self.commit_list_state {
-            list_state.update_height(list_area.height as usize);
+            if let Some(panel) = areas.panel {
+                list_state.workspace.clear_rows_under(&self.ctx, panel);
+            }
+            list_state.update_height(areas.list.height as usize);
         }
+    }
+
+    pub fn list_state(&self) -> Option<&CommitListState<'a>> {
+        self.commit_list_state.as_ref()
+    }
+
+    pub fn list_state_mut(&mut self) -> Option<&mut CommitListState<'a>> {
+        self.commit_list_state.as_mut()
     }
 }
 
