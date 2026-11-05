@@ -223,6 +223,11 @@
               "type": "boolean",
               "description": "React to the pointer passing over items (hover highlight, hover-to-select). Off: the mouse acts on clicks and the wheel only.",
               "default": false
+            },
+            "tmux_navigation": {
+              "type": "boolean",
+              "description": "Inside tmux, receive Ctrl+h/j/k/l like vim with smart-splits (sets the pane's @pane-is-vim) and hand the move to tmux at the edge of gitoui's windows.",
+              "default": false
             }
           },
           "additionalProperties": false
@@ -343,6 +348,11 @@
               "description": "Which side of the commit list the refs list opens on.",
               "enum": ["left", "right"],
               "default": "right"
+            },
+            "always_open": {
+              "type": "boolean",
+              "description": "Keep the refs tree on screen as a sidebar; ref_list and the focus keys move focus into it.",
+              "default": false
             }
           },
           "additionalProperties": false

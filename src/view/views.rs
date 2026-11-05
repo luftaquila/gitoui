@@ -524,7 +524,10 @@ impl<'a> View<'a> {
     pub fn main_areas(&self) -> Option<crate::view::MainAreas> {
         let list_state = match self {
             View::List(view) => view.as_list_state(),
+            View::Refs(view) => view.as_list_state(),
             View::Detail(view) => view.as_list_state(),
+            View::BranchDetail(view) => view.list_state()?,
+            View::TagDetail(view) => view.list_state()?,
             _ => return None,
         };
         list_state.workspace.areas
@@ -536,6 +539,10 @@ impl<'a> View<'a> {
         match self {
             View::List(view) => view.handle_wheel(col, row, down),
             View::Detail(view) => view.handle_wheel(col, row, down),
+            View::Refs(view) => view
+                .as_mut_list_state()
+                .workspace
+                .handle_wheel(col, row, down),
             _ => false,
         }
     }

@@ -24,7 +24,8 @@ mod workspace;
 
 pub use views::*;
 
-pub(crate) use detail::{persist_panel_height, set_panel_height, DetailPreview};
+pub(crate) use detail::{persist_panel_height, set_panel_height, split_panel, DetailPreview};
+pub(crate) use refs::RefsPanel;
 pub(crate) use workspace::{MainAreas, Workspace};
 
 pub(crate) fn adaptive_detail_height(

@@ -304,9 +304,15 @@ impl<'a> ListView<'a> {
         self.maybe_sync_search_status();
     }
 
-    /// Commit list, and the preview panel under it.
+    /// Refs sidebar (`[ui.refs] always_open`), commit list, preview panel.
     fn layout(&self, area: Rect) -> MainAreas {
-        main_areas(&self.ctx, area, preview_on(&self.ctx))
+        let list_state = self.as_list_state();
+        let refs = if self.ctx.ui_config.refs.always_open {
+            list_state.workspace.refs.as_ref()
+        } else {
+            None
+        };
+        main_areas(&self.ctx, area, refs, preview_on(&self.ctx))
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
@@ -314,14 +320,17 @@ impl<'a> ListView<'a> {
         let ctx = self.ctx.clone();
         let tx = self.tx.clone();
         let list_state = self.commit_list_state.as_mut().unwrap();
-        // With the preview panel on screen, accent the list while it has focus.
-        let shared = areas.panel.is_some();
+        // With other panels on screen, accent the list while it has focus.
+        let shared = areas.refs.is_some() || areas.panel.is_some();
         let commit_list = CommitList::new(ctx.clone()).with_focus(shared.then_some(true));
         f.render_stateful_widget(commit_list, areas.list, list_state);
         if let Some(panel_area) = areas.panel {
             list_state
                 .workspace
                 .render_preview(f, panel_area, &ctx, &tx);
+        }
+        if let (Some(refs_area), Some(refs)) = (areas.refs, list_state.workspace.refs.as_mut()) {
+            refs.render(f, refs_area, &ctx, false);
         }
         list_state.workspace.areas = Some(areas);
     }
@@ -649,6 +658,11 @@ impl<'a> ListView<'a> {
                         list_state.cancel_search();
                         self.clear_search_query();
                     }
+                    // With the preview panel, a click just selects (the
+                    // panel follows); Enter / focus-down goes into it.
+                    if self.ctx.ui_config.detail.preview {
+                        return;
+                    }
                     if is_uncommitted {
                         self.tx.send(AppEvent::OpenUncommitted);
                     } else {
@@ -659,7 +673,7 @@ impl<'a> ListView<'a> {
         }
     }
 
-    /// Wheel over the preview panel scrolls it, not the list.
+    /// Wheel over the preview panel or the refs sidebar scrolls it, not the list.
     pub fn handle_wheel(&mut self, col: u16, row: u16, down: bool) -> bool {
         self.as_mut_list_state()
             .workspace

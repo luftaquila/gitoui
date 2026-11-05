@@ -190,6 +190,7 @@ impl RefListState {
 pub struct RefList {
     items: Vec<TreeItem<'static, String>>,
     ctx: Rc<AppContext>,
+    focused: bool,
 }
 
 impl RefList {
@@ -199,7 +200,17 @@ impl RefList {
         ctx: Rc<AppContext>,
     ) -> RefList {
         let items = build_ref_tree_items(refs, worktrees, &ctx);
-        RefList { items, ctx }
+        RefList {
+            items,
+            ctx,
+            focused: true,
+        }
+    }
+
+    /// Unfocused, the selected ref uses the dimmer inactive-selection colour.
+    pub fn with_focus(mut self, focused: bool) -> Self {
+        self.focused = focused;
+        self
     }
 }
 
@@ -230,11 +241,15 @@ impl StatefulWidget for RefList {
             .node_closed_symbol("\u{25b8} ") // ▸
             .node_open_symbol("\u{25be} ") // ▾
             .node_no_children_symbol("  ")
-            .highlight_style(
+            .highlight_style(if self.focused {
                 Style::default()
                     .bg(self.ctx.color_theme.ref_selected_bg)
-                    .fg(self.ctx.color_theme.ref_selected_fg),
-            )
+                    .fg(self.ctx.color_theme.ref_selected_fg)
+            } else {
+                Style::default()
+                    .bg(self.ctx.color_theme.inactive_selected_bg())
+                    .fg(self.ctx.color_theme.fg)
+            })
             .block(
                 Block::default()
                     // Divider on the side that faces the commit list.

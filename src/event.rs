@@ -1170,6 +1170,11 @@ pub enum UserEvent {
     // Detail panel height
     PanelGrow,
     PanelShrink,
+    // Focus the neighbouring window (refs, list, files, diff)
+    FocusLeft,
+    FocusDown,
+    FocusUp,
+    FocusRight,
     // Branch upstream
     SetUpstream,
     // Abort in-progress rebase/merge/cherry-pick
@@ -1293,6 +1298,10 @@ impl<'de> Deserialize<'de> for UserEvent {
                         "cycle_file_prev" => Ok(UserEvent::CycleFilePrev),
                         "panel_grow" => Ok(UserEvent::PanelGrow),
                         "panel_shrink" => Ok(UserEvent::PanelShrink),
+                        "focus_left" => Ok(UserEvent::FocusLeft),
+                        "focus_down" => Ok(UserEvent::FocusDown),
+                        "focus_up" => Ok(UserEvent::FocusUp),
+                        "focus_right" => Ok(UserEvent::FocusRight),
                         "set_upstream" => Ok(UserEvent::SetUpstream),
                         "abort_operation" => Ok(UserEvent::AbortOperation),
                         "amend_commit" => Ok(UserEvent::AmendCommit),

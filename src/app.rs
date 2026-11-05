@@ -35,10 +35,54 @@ use crate::{
     keybind::KeyBinds,
     protocol::ImageProtocol,
     view::{RefreshViewContext, View},
+    widget::commit_detail::PanelFocus,
     widget::commit_list::{CommitInfo, CommitListState},
     widget::{branch_detail::BranchMetadata, tag_detail::TagMetadata},
 };
 use ratatui::style::Color;
+
+/// Windows around the commit list that can take focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Window {
+    Refs,
+    List,
+    Files,
+    Diff,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    Left,
+    Down,
+    Up,
+    Right,
+}
+
+/// `[ui.common] tmux_navigation`: sets the pane's `@pane-is-vim` while
+/// gitoui runs, so tmux (smart-splits) passes Ctrl+h/j/k/l through.
+struct TmuxPaneFlag(Option<String>);
+
+impl TmuxPaneFlag {
+    fn set(enabled: bool) -> Self {
+        let pane = std::env::var("TMUX_PANE").ok().filter(|_| enabled);
+        if let Some(pane) = &pane {
+            let _ = std::process::Command::new("tmux")
+                .args(["set-option", "-p", "-t", pane, "@pane-is-vim", "1"])
+                .status();
+        }
+        TmuxPaneFlag(pane)
+    }
+}
+
+impl Drop for TmuxPaneFlag {
+    fn drop(&mut self) {
+        if let Some(pane) = &self.0 {
+            let _ = std::process::Command::new("tmux")
+                .args(["set-option", "-p", "-u", "-t", pane, "@pane-is-vim"])
+                .status();
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 enum StatusLine {
@@ -324,6 +368,8 @@ pub struct App<'a> {
     pending_refresh: Option<RefreshRequest>,
     /// Dragging the detail panel's top edge.
     panel_drag: bool,
+    /// Closing the branch / tag detail returns to the refs tree.
+    detail_from_refs: bool,
     /// Transient "this dir isn't a git repo" message shown in the footer
     /// left (replacing "Changing directory…") for ~2 seconds when the user
     /// tries to commit a non-git target. Auto-clears once `Instant::elapsed`
@@ -634,6 +680,7 @@ impl<'a> App<'a> {
             dir_input_cursor_anchor: None,
             pending_refresh: None,
             panel_drag: false,
+            detail_from_refs: false,
             dir_error_message: None,
             pr_nav_stack: Vec::new(),
             dir_recents: {
@@ -673,6 +720,7 @@ impl<'a> App<'a> {
 
 impl App<'_> {
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<Ret, std::io::Error> {
+        let _tmux_pane_flag = TmuxPaneFlag::set(self.ctx.ui_config.common.tmux_navigation);
         // No proactive `clear_image` / `clear_terminal` here. Those
         // emitted Kitty delete-all escapes and full-screen blanks
         // at EVERY entry into the App, including the silent swap
@@ -761,6 +809,7 @@ impl App<'_> {
                 // was in Detail / PR / etc., apply it now so the
                 // next render rebakes lanes against the full topology.
                 self.drain_pending_replace_graph();
+                self.sync_refs_sidebar();
                 self.prepare_render(terminal)?;
                 self.sync_list_preview();
                 self.flush_pending_graph_uploads()?;
@@ -1078,6 +1127,20 @@ impl App<'_> {
                             Some(UserEvent::Quit) if !text_input_active => {
                                 self.ec.send(AppEvent::Quit);
                             }
+                            Some(
+                                event @ (UserEvent::FocusLeft
+                                | UserEvent::FocusDown
+                                | UserEvent::FocusUp
+                                | UserEvent::FocusRight),
+                            ) if !text_input_active => {
+                                let dir = match event {
+                                    UserEvent::FocusLeft => Direction::Left,
+                                    UserEvent::FocusDown => Direction::Down,
+                                    UserEvent::FocusUp => Direction::Up,
+                                    _ => Direction::Right,
+                                };
+                                self.move_focus(dir, terminal)?;
+                            }
                             Some(UserEvent::PullRequests)
                                 if !text_input_active
                                     && !matches!(self.view, View::PullRequests(_))
@@ -1286,7 +1349,10 @@ impl App<'_> {
                     }
                     AppEvent::CloseDetail => {
                         let same_layout = self.ctx.ui_config.detail.preview
-                            && matches!(self.view, View::Detail(_))
+                            && matches!(
+                                self.view,
+                                View::Detail(_) | View::BranchDetail(_) | View::TagDetail(_)
+                            )
                             && self.pr_nav_stack.is_empty();
                         if !self.close_detail() {
                             // No commit list state available (e.g. opened from Refs panel)
@@ -1592,8 +1658,10 @@ impl App<'_> {
                         self.execute_git_action(target, action);
                     }
                     AppEvent::OpenBranchDetail { branch_name } => {
-                        self.clear_image(Some(terminal))?;
-                        self.clear_terminal(terminal)?;
+                        if !self.keeps_panel_layout() {
+                            self.clear_image(Some(terminal))?;
+                            self.clear_terminal(terminal)?;
+                        }
                         self.open_branch_detail(branch_name);
                     }
                     AppEvent::OpenSetUpstreamDialog { branch } => {
@@ -1610,8 +1678,10 @@ impl App<'_> {
                         }
                     }
                     AppEvent::OpenTagDetail { tag_name } => {
-                        self.clear_image(Some(terminal))?;
-                        self.clear_terminal(terminal)?;
+                        if !self.keeps_panel_layout() {
+                            self.clear_image(Some(terminal))?;
+                            self.clear_terminal(terminal)?;
+                        }
                         self.open_tag_detail(tag_name);
                     }
                     AppEvent::OpenUncommitted => {
@@ -3807,10 +3877,11 @@ impl<'a> App<'a> {
         if !self.ctx.ui_config.detail.preview {
             return;
         }
-        let View::List(ref mut view) = self.view else {
-            return;
+        let list_state = match self.view {
+            View::List(ref mut view) => view.as_mut_list_state(),
+            View::Refs(ref mut view) => view.as_mut_list_state(),
+            _ => return,
         };
-        let list_state = view.as_mut_list_state();
         let selected = list_state.selected_commit_hash().clone();
         if list_state.workspace.preview_hash() == Some(&selected) {
             return;
@@ -3846,6 +3917,217 @@ impl<'a> App<'a> {
             )));
     }
 
+    /// `[ui.refs] always_open`: add the refs sidebar when the view has none.
+    fn sync_refs_sidebar(&mut self) {
+        if !self.ctx.ui_config.refs.always_open {
+            return;
+        }
+        let list_state = match self.view {
+            View::List(ref mut view) => view.as_mut_list_state(),
+            View::Detail(ref mut view) => view.as_mut_list_state(),
+            View::BranchDetail(ref mut view) => match view.list_state_mut() {
+                Some(list_state) => list_state,
+                None => return,
+            },
+            View::TagDetail(ref mut view) => match view.list_state_mut() {
+                Some(list_state) => list_state,
+                None => return,
+            },
+            _ => return,
+        };
+        if list_state.workspace.refs.is_none() {
+            let refs = self.repository.all_refs().into_iter().cloned().collect();
+            list_state.workspace.refs = Some(crate::view::RefsPanel::load(refs));
+        }
+    }
+
+    /// Focused window, if the view is laid out around the commit list.
+    fn current_window(&self) -> Option<Window> {
+        match &self.view {
+            View::List(_) => Some(Window::List),
+            View::Refs(_) => Some(Window::Refs),
+            View::Detail(view) => Some(if view.focus() == PanelFocus::Diff {
+                Window::Diff
+            } else {
+                Window::Files
+            }),
+            // Their panel sits where the changed files are.
+            View::BranchDetail(_) | View::TagDetail(_) => Some(Window::Files),
+            _ => None,
+        }
+    }
+
+    /// With the preview panel, this view shares the List view's layout, so
+    /// switching to or from it needs no full redraw.
+    fn keeps_panel_layout(&self) -> bool {
+        self.ctx.ui_config.detail.preview
+            && matches!(
+                self.view,
+                View::List(_)
+                    | View::Refs(_)
+                    | View::Detail(_)
+                    | View::BranchDetail(_)
+                    | View::TagDetail(_)
+            )
+    }
+
+    fn window_at(&self, col: u16, row: u16) -> Option<Window> {
+        let areas = self.view.main_areas()?;
+        let pos = ratatui::layout::Position::new(col, row);
+        if areas.refs.is_some_and(|a| a.contains(pos)) {
+            return Some(Window::Refs);
+        }
+        if areas.list.contains(pos) {
+            return Some(Window::List);
+        }
+        let panel = areas.panel.filter(|a| a.contains(pos))?;
+        let [_, diff_area] = crate::view::split_panel(panel);
+        Some(
+            if self.ctx.ui_config.detail.diff_pane && diff_area.contains(pos) {
+                Window::Diff
+            } else {
+                Window::Files
+            },
+        )
+    }
+
+    /// Neighbour of `from` toward `dir`: the refs sidebar on its side, the
+    /// commit list over [files | diff].
+    fn window_toward(&self, from: Window, dir: Direction) -> Option<Window> {
+        let refs_left = self.ctx.ui_config.refs.position == crate::config::RefsPosition::Left;
+        let diff_pane = self.ctx.ui_config.detail.diff_pane;
+        let (to_refs, from_refs) = if refs_left {
+            (Direction::Left, Direction::Right)
+        } else {
+            (Direction::Right, Direction::Left)
+        };
+        use Window::*;
+        match (from, dir) {
+            (Refs, d) if d == from_refs => Some(List),
+            (List, d) if d == to_refs => Some(Refs),
+            (List, Direction::Down) => Some(Files),
+            (Files | Diff, Direction::Up) => Some(List),
+            (Files, Direction::Right) if diff_pane => Some(Diff),
+            (Diff, Direction::Left) => Some(Files),
+            // From the panel's outer edge toward the refs.
+            (Files, d) if d == to_refs && refs_left => Some(Refs),
+            (Diff, d) if d == to_refs && !refs_left => Some(Refs),
+            (Files, d) if d == to_refs && !diff_pane => Some(Refs),
+            _ => None,
+        }
+    }
+
+    /// Ctrl+h/j/k/l: focus the neighbouring window, or hand off to tmux.
+    fn move_focus(&mut self, dir: Direction, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        let target = self
+            .current_window()
+            .and_then(|from| self.window_toward(from, dir));
+        match target {
+            Some(target) => self.focus_window(target, terminal),
+            None => {
+                self.tmux_select_pane(dir);
+                Ok(())
+            }
+        }
+    }
+
+    /// Focus `target`, switching List / Refs / Detail one step at a time
+    /// (e.g. files -> list -> refs).
+    fn focus_window(&mut self, target: Window, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        for _ in 0..3 {
+            let Some(current) = self.current_window() else {
+                break;
+            };
+            if current == target || !self.focus_step(current, target, terminal)? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// One view switch toward `target`; false when none is possible.
+    fn focus_step(
+        &mut self,
+        current: Window,
+        target: Window,
+        terminal: &mut DefaultTerminal,
+    ) -> io::Result<bool> {
+        let into_panel = matches!(target, Window::Files | Window::Diff);
+        match current {
+            Window::Refs => {
+                self.close_refs();
+                Ok(true)
+            }
+            Window::Files | Window::Diff if !into_panel => {
+                let same_layout = self.keeps_panel_layout() && self.pr_nav_stack.is_empty();
+                if !self.close_detail() {
+                    return Ok(false);
+                }
+                if !same_layout {
+                    self.clear_image(Some(terminal))?;
+                    self.clear_terminal(terminal)?;
+                }
+                Ok(true)
+            }
+            Window::Files | Window::Diff => match self.view {
+                // Between the changed files and the diff.
+                View::Detail(ref mut view) => {
+                    view.set_focus(if target == Window::Diff {
+                        PanelFocus::Diff
+                    } else {
+                        PanelFocus::Files
+                    });
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+            Window::List if target == Window::Refs => {
+                self.open_refs();
+                Ok(true)
+            }
+            Window::List => {
+                let View::List(ref view) = self.view else {
+                    return Ok(false);
+                };
+                // The uncommitted row has its own full view (Enter).
+                if view.as_list_state().is_uncommitted_selected() {
+                    return Ok(false);
+                }
+                if !self.ctx.ui_config.detail.preview {
+                    self.clear_image(Some(terminal))?;
+                    self.clear_terminal(terminal)?;
+                }
+                self.open_detail();
+                if let View::Detail(ref mut view) = self.view {
+                    view.set_focus(if target == Window::Diff {
+                        PanelFocus::Diff
+                    } else {
+                        PanelFocus::Files
+                    });
+                }
+                Ok(true)
+            }
+        }
+    }
+
+    fn tmux_select_pane(&self, dir: Direction) {
+        if !self.ctx.ui_config.common.tmux_navigation {
+            return;
+        }
+        let Ok(pane) = std::env::var("TMUX_PANE") else {
+            return;
+        };
+        let flag = match dir {
+            Direction::Left => "-L",
+            Direction::Down => "-D",
+            Direction::Up => "-U",
+            Direction::Right => "-R",
+        };
+        let _ = std::process::Command::new("tmux")
+            .args(["select-pane", "-t", &pane, flag])
+            .status();
+    }
+
     fn close_detail(&mut self) -> bool {
         // Walk the PR nav stack, when the Detail view sits on top
         // of a PR drilldown, Esc pops one level and rebuilds the
@@ -3866,23 +4148,23 @@ impl<'a> App<'a> {
                 self.view = View::of_list(commit_list_state, self.ctx.clone(), self.ec.sender());
                 true
             }
-            View::BranchDetail(ref mut view) => {
-                if let Some(commit_list_state) = view.take_list_state() {
-                    self.view =
-                        View::of_list(commit_list_state, self.ctx.clone(), self.ec.sender());
-                    true
+            View::BranchDetail(_) | View::TagDetail(_) => {
+                let commit_list_state = match self.view {
+                    View::BranchDetail(ref mut view) => view.take_list_state(),
+                    View::TagDetail(ref mut view) => view.take_list_state(),
+                    _ => None,
+                };
+                let Some(commit_list_state) = commit_list_state else {
+                    return false;
+                };
+                // Back to the refs tree when it was opened from there.
+                self.view = if std::mem::take(&mut self.detail_from_refs) {
+                    let refs = self.repository.all_refs().into_iter().cloned().collect();
+                    View::of_refs(commit_list_state, refs, self.ctx.clone(), self.ec.sender())
                 } else {
-                    false
-                }
-            }
-            View::TagDetail(ref mut view) => {
-                if let Some(commit_list_state) = view.take_list_state() {
-                    self.view =
-                        View::of_list(commit_list_state, self.ctx.clone(), self.ec.sender());
-                    true
-                } else {
-                    false
-                }
+                    View::of_list(commit_list_state, self.ctx.clone(), self.ec.sender())
+                };
+                true
             }
             View::Uncommitted(ref mut view) => {
                 if let Some(commit_list_state) = view.take_list_state() {
@@ -5667,7 +5949,10 @@ impl<'a> App<'a> {
     /// A left refs panel shifts the commit list sideways: drop the graph
     /// image placements so none stay at the old columns.
     fn reset_graph_images_if_refs_left(&mut self) {
-        if self.ctx.ui_config.refs.position == crate::config::RefsPosition::Left {
+        // With the sidebar always open the list never moves.
+        if self.ctx.ui_config.refs.position == crate::config::RefsPosition::Left
+            && !self.ctx.ui_config.refs.always_open
+        {
             let graph_ids = self.view.graph_image_ids_sorted();
             let _ = self.ctx.image_protocol.delete_images(&graph_ids);
             self.view.clear_graph_images();
@@ -6277,6 +6562,10 @@ impl<'a> App<'a> {
                 if self.view.on_panel_edge(mouse.column, mouse.row) {
                     self.panel_drag = true;
                     return Ok(true);
+                }
+                // Focus the clicked window first, then let it take the click.
+                if let Some(target) = self.window_at(mouse.column, mouse.row) {
+                    self.focus_window(target, terminal)?;
                 }
                 if mouse.modifiers.contains(KeyModifiers::CONTROL) {
                     self.view.handle_shift_click(mouse.column, mouse.row);
@@ -6934,6 +7223,7 @@ impl<'a> App<'a> {
     }
 
     fn open_branch_detail(&mut self, branch_name: String) {
+        self.detail_from_refs = matches!(self.view, View::Refs(_));
         let commit_list_state = match self.view {
             View::List(ref mut view) => Some(view.take_list_state()),
             View::Detail(ref mut view) => Some(view.take_list_state()),
@@ -6984,6 +7274,7 @@ impl<'a> App<'a> {
     }
 
     fn open_tag_detail(&mut self, tag_name: String) {
+        self.detail_from_refs = matches!(self.view, View::Refs(_));
         let commit_list_state = match self.view {
             View::List(ref mut view) => Some(view.take_list_state()),
             View::Detail(ref mut view) => Some(view.take_list_state()),

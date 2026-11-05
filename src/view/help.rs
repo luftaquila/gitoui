@@ -520,6 +520,18 @@ fn sections(kb: &KeyBinds) -> Vec<HelpSection> {
                 ),
                 sg(kb, UserEvent::PanelShrink, "Shorter detail panel"),
                 sg(kb, UserEvent::RefList, "Detail: switch focus files / diff"),
+                sg(
+                    kb,
+                    UserEvent::FocusLeft,
+                    "Window on the left (refs / files)",
+                ),
+                sg(kb, UserEvent::FocusDown, "Window below (changed files)"),
+                sg(kb, UserEvent::FocusUp, "Window above (commit list)"),
+                sg(
+                    kb,
+                    UserEvent::FocusRight,
+                    "Window on the right (list / diff)",
+                ),
                 sg(kb, UserEvent::SelectMiddle, "Select middle of viewport"),
                 sg(kb, UserEvent::SelectBottom, "Select bottom of viewport"),
                 sg(kb, UserEvent::ScrollDown, "Scroll one line down"),

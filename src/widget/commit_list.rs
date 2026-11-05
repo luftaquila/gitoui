@@ -376,7 +376,7 @@ pub struct CommitListState<'a> {
     // Per visible row: cells the marker / message are pulled left to start
     // right after that row's own lanes. Empty when compaction is off.
     graph_row_shifts: Vec<u16>,
-    /// Preview panel, kept across the List / Detail views.
+    /// Refs sidebar and preview panel, kept across List / Refs / Detail.
     pub(crate) workspace: crate::view::Workspace<'a>,
     // Horizontal scroll offset (in graph cells) for the lane viewport.
     // Only matters when the native graph is wider than the column cap
