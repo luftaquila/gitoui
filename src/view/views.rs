@@ -514,6 +514,16 @@ impl<'a> View<'a> {
         }
     }
 
+    /// Wheel over a detail panel scrolls the part under the pointer; false
+    /// falls back to the usual scroll event.
+    pub fn handle_wheel(&mut self, col: u16, row: u16, down: bool) -> bool {
+        match self {
+            View::List(view) => view.handle_wheel(col, row, down),
+            View::Detail(view) => view.handle_wheel(col, row, down),
+            _ => false,
+        }
+    }
+
     pub fn handle_mouse_move(&mut self, col: u16, row: u16) -> bool {
         match self {
             View::List(view) => view.handle_mouse_move(col, row),

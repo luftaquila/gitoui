@@ -7,7 +7,10 @@ use crate::{
     config::save,
     event::{AppEvent, Sender, UserEvent, UserEventWithCount},
     git::CommitHash,
-    view::{ListRefreshViewContext, RefreshViewContext},
+    view::{
+        workspace::{main_areas, preview_on},
+        ListRefreshViewContext, MainAreas, RefreshViewContext,
+    },
     widget::commit_list::{CommitList, CommitListState, SearchState},
 };
 
@@ -298,18 +301,41 @@ impl<'a> ListView<'a> {
         self.maybe_sync_search_status();
     }
 
+    /// Commit list, and the preview panel under it.
+    fn layout(&self, area: Rect) -> MainAreas {
+        main_areas(&self.ctx, area, preview_on(&self.ctx))
+    }
+
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
-        let commit_list = CommitList::new(self.ctx.clone());
-        f.render_stateful_widget(commit_list, area, self.as_mut_list_state());
+        let areas = self.layout(area);
+        let ctx = self.ctx.clone();
+        let tx = self.tx.clone();
+        let list_state = self.commit_list_state.as_mut().unwrap();
+        let commit_list = CommitList::new(ctx.clone());
+        f.render_stateful_widget(commit_list, areas.list, list_state);
+        if let Some(panel_area) = areas.panel {
+            list_state
+                .workspace
+                .render_preview(f, panel_area, &ctx, &tx);
+        }
     }
 
     pub fn update_layout(&mut self, area: Rect) {
-        let height = if area.height >= 2 {
-            area.height - 2
+        let areas = self.layout(area);
+        let ctx = self.ctx.clone();
+        let list_state = self.as_mut_list_state();
+        // A taller commit list drawn before (e.g. the refs view) may have
+        // left Kitty graph placements where the panel now is.
+        if let Some(panel_area) = areas.panel {
+            list_state.workspace.clear_rows_under(&ctx, panel_area);
+        }
+        let list = areas.list;
+        let height = if list.height >= 2 {
+            list.height - 2
         } else {
-            area.height
+            list.height
         };
-        self.as_mut_list_state().update_height(height as usize);
+        list_state.update_height(height as usize);
     }
 
     pub fn prepare_graph_uploads(&mut self) {
@@ -625,6 +651,13 @@ impl<'a> ListView<'a> {
                 }
             }
         }
+    }
+
+    /// Wheel over the preview panel scrolls it, not the list.
+    pub fn handle_wheel(&mut self, col: u16, row: u16, down: bool) -> bool {
+        self.as_mut_list_state()
+            .workspace
+            .handle_wheel(col, row, down)
     }
 
     pub fn handle_mouse_move(&mut self, col: u16, row: u16) -> bool {

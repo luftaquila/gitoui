@@ -759,6 +759,7 @@ impl App<'_> {
                 // next render rebakes lanes against the full topology.
                 self.drain_pending_replace_graph();
                 self.prepare_render(terminal)?;
+                self.sync_list_preview();
                 self.flush_pending_graph_uploads()?;
                 terminal.draw(|f| self.render(f))?;
                 self.flush_pending_avatar_deletes()?;
@@ -1270,11 +1271,20 @@ impl App<'_> {
                         return Ok(Ret::Quit);
                     }
                     AppEvent::OpenDetail => {
-                        self.clear_image(Some(terminal))?;
-                        self.clear_terminal(terminal)?;
+                        // With the preview panel, List and Detail share a
+                        // layout: no full redraw.
+                        let same_layout =
+                            self.ctx.ui_config.detail.preview && matches!(self.view, View::List(_));
+                        if !same_layout {
+                            self.clear_image(Some(terminal))?;
+                            self.clear_terminal(terminal)?;
+                        }
                         self.open_detail();
                     }
                     AppEvent::CloseDetail => {
+                        let same_layout = self.ctx.ui_config.detail.preview
+                            && matches!(self.view, View::Detail(_))
+                            && self.pr_nav_stack.is_empty();
                         if !self.close_detail() {
                             // No commit list state available (e.g. opened from Refs panel)
                             // Force a full refresh to rebuild the list view
@@ -1291,8 +1301,10 @@ impl App<'_> {
                                 },
                             }));
                         }
-                        self.clear_image(Some(terminal))?;
-                        self.clear_terminal(terminal)?;
+                        if !same_layout {
+                            self.clear_image(Some(terminal))?;
+                            self.clear_terminal(terminal)?;
+                        }
                     }
                     AppEvent::OpenUserCommand(n) => {
                         self.clear_image(Some(terminal))?;
@@ -3778,6 +3790,50 @@ impl<'a> App<'a> {
         );
     }
 
+    /// `[ui.detail] preview`: show the highlighted row in the panel.
+    fn sync_list_preview(&mut self) {
+        if !self.ctx.ui_config.detail.preview {
+            return;
+        }
+        let View::List(ref mut view) = self.view else {
+            return;
+        };
+        let list_state = view.as_mut_list_state();
+        let selected = list_state.selected_commit_hash().clone();
+        if list_state.workspace.preview_hash() == Some(&selected) {
+            return;
+        }
+        if list_state.is_uncommitted_selected() {
+            // Always reloaded: the work tree changes under it.
+            let changes = UncommittedChanges::load(self.repository.path()).unwrap_or_default();
+            list_state
+                .workspace
+                .set_preview(Some(crate::view::DetailPreview::uncommitted(
+                    &self.ctx, selected, &changes,
+                )));
+            return;
+        }
+        if list_state.workspace.restore_preview(&selected) {
+            return;
+        }
+        let (commit, changes, refs) = selected_commit_details(self.repository, list_state);
+        let head_branch_name = match self.repository.head() {
+            Head::Branch { name } => Some(name.clone()),
+            _ => None,
+        };
+        let head_commit_hash = head_commit_hash_from_repository(self.repository);
+        list_state
+            .workspace
+            .set_preview(Some(crate::view::DetailPreview::new(
+                &self.ctx,
+                commit,
+                changes,
+                refs,
+                head_branch_name,
+                head_commit_hash,
+            )));
+    }
+
     fn close_detail(&mut self) -> bool {
         // Walk the PR nav stack, when the Detail view sits on top
         // of a PR drilldown, Esc pops one level and rebuilds the
@@ -6069,6 +6125,8 @@ impl<'a> App<'a> {
             MouseEventKind::ScrollUp => {
                 if self.dir_input.active {
                     self.dir_input.scroll_by(-3);
+                } else if self.view.handle_wheel(mouse.column, mouse.row, false) {
+                    // Scrolled the detail panel part under the pointer.
                 } else {
                     self.handle_view_event_clearing_detail_avatar(
                         crate::event::UserEventWithCount::new(crate::event::UserEvent::ScrollUp, 3),
@@ -6084,6 +6142,8 @@ impl<'a> App<'a> {
             MouseEventKind::ScrollDown => {
                 if self.dir_input.active {
                     self.dir_input.scroll_by(3);
+                } else if self.view.handle_wheel(mouse.column, mouse.row, true) {
+                    // Scrolled the detail panel part under the pointer.
                 } else {
                     self.handle_view_event_clearing_detail_avatar(
                         crate::event::UserEventWithCount::new(

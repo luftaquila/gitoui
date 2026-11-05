@@ -5,11 +5,12 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Padding, Paragraph, StatefulWidget, Widget},
+    widgets::{Block, Borders, Padding, Paragraph, StatefulWidget, Widget, Wrap},
 };
 
 use crate::{
     app::AppContext,
+    config::DetailFileView,
     git::{Commit, FileChange, Ref},
 };
 
@@ -23,19 +24,28 @@ pub struct CommitDetailState {
     last_selected_file: usize,
     avatar_row: Option<u16>,
     pending_avatar_delete_row: Option<u16>,
+    /// Screen row of the first scrolled line and the line where the files
+    /// start, recorded at render to map mouse rows to files.
+    content_top: u16,
+    changes_start: usize,
 }
 
 impl CommitDetailState {
     pub fn drain_pending_avatar_delete(&mut self) -> Option<u16> {
         self.pending_avatar_delete_row.take()
     }
+
+    pub fn content_line_at(&self, row: u16) -> Option<usize> {
+        let below = row.checked_sub(self.content_top)?;
+        (below < self.height as u16).then(|| self.offset + below as usize)
+    }
+
+    pub fn changes_start(&self) -> usize {
+        self.changes_start
+    }
 }
 
 impl CommitDetailState {
-    pub fn offset(&self) -> usize {
-        self.offset
-    }
-
     pub fn scroll_down(&mut self) {
         self.offset = self.offset.saturating_add(1);
     }
@@ -84,10 +94,9 @@ impl CommitDetailState {
         }
     }
 
-    fn ensure_selected_visible(&mut self, changes_start: usize) {
+    fn ensure_selected_visible(&mut self, selected_line: usize) {
         if self.selected_file != self.last_selected_file {
             self.last_selected_file = self.selected_file;
-            let selected_line = changes_start + self.selected_file;
             if selected_line < self.offset {
                 self.offset = selected_line;
             } else if selected_line >= self.offset + self.height {
@@ -108,6 +117,8 @@ pub struct CommitDetail<'a> {
     /// surfaces as `· PR #n` next to the panel title so the user
     /// always sees the originating context.
     pr_origin: Option<u64>,
+    /// Off when the diff pane takes the git-actions column's place.
+    show_actions: bool,
 }
 
 impl<'a> CommitDetail<'a> {
@@ -127,6 +138,7 @@ impl<'a> CommitDetail<'a> {
             head_branch_name,
             is_head_commit,
             pr_origin: None,
+            show_actions: true,
         }
     }
 
@@ -136,6 +148,104 @@ impl<'a> CommitDetail<'a> {
         self.pr_origin = pr_number;
         self
     }
+
+    pub fn with_actions(mut self, show_actions: bool) -> Self {
+        self.show_actions = show_actions;
+        self
+    }
+
+    fn tree(&self) -> bool {
+        self.ctx.ui_config.detail.file_view == DetailFileView::Tree
+    }
+}
+
+/// One row of the changed-files section: a directory (`file: None`, tree
+/// view only) or a file (`file: Some(index into the changes)`).
+pub struct ChangeRow {
+    pub file: Option<usize>,
+    depth: usize,
+    name: String,
+}
+
+pub fn change_path(change: &FileChange) -> &str {
+    match change {
+        FileChange::Add { path, .. }
+        | FileChange::Modify { path, .. }
+        | FileChange::Delete { path, .. } => path,
+        FileChange::Move { to, .. } => to,
+    }
+}
+
+#[derive(Default)]
+struct DirNode {
+    dirs: std::collections::BTreeMap<String, DirNode>,
+    files: Vec<(String, usize)>,
+}
+
+/// Directories first, then files, each by name; a directory holding only
+/// one subdirectory is merged with it into a single `a/b` row.
+fn walk_dir_tree(node: &DirNode, depth: usize, out: &mut Vec<ChangeRow>) {
+    for (name, mut child) in &node.dirs {
+        let mut label = name.clone();
+        while child.files.is_empty() && child.dirs.len() == 1 {
+            let (sub_name, sub) = child.dirs.iter().next().unwrap();
+            label = format!("{label}/{sub_name}");
+            child = sub;
+        }
+        out.push(ChangeRow {
+            file: None,
+            depth,
+            name: label,
+        });
+        walk_dir_tree(child, depth + 1, out);
+    }
+    let mut files: Vec<&(String, usize)> = node.files.iter().collect();
+    files.sort();
+    for (name, i) in files {
+        out.push(ChangeRow {
+            file: Some(*i),
+            depth,
+            name: name.clone(),
+        });
+    }
+}
+
+pub fn change_rows(changes: &[FileChange], tree: bool) -> Vec<ChangeRow> {
+    if !tree {
+        return changes
+            .iter()
+            .enumerate()
+            .map(|(i, c)| ChangeRow {
+                file: Some(i),
+                depth: 0,
+                name: change_path(c).to_string(),
+            })
+            .collect();
+    }
+    let mut root = DirNode::default();
+    for (i, c) in changes.iter().enumerate() {
+        let mut parts: Vec<&str> = change_path(c).split('/').collect();
+        let name = parts.pop().unwrap_or_default().to_string();
+        let mut node = &mut root;
+        for part in parts {
+            node = node.dirs.entry(part.to_string()).or_default();
+        }
+        node.files.push((name, i));
+    }
+    let mut rows = Vec::new();
+    walk_dir_tree(&root, 0, &mut rows);
+    rows
+}
+
+/// Reorder `changes` as the tree lists them, so index order is screen order.
+pub fn sort_changes_for_tree(changes: &mut Vec<FileChange>) {
+    let order: Vec<usize> = change_rows(changes, true)
+        .iter()
+        .filter_map(|r| r.file)
+        .collect();
+    let mut taken: Vec<Option<FileChange>> =
+        std::mem::take(changes).into_iter().map(Some).collect();
+    *changes = order.into_iter().filter_map(|i| taken[i].take()).collect();
 }
 
 /// Display label + the global `UserEvent` it dispatches. The on-screen
@@ -194,6 +304,10 @@ impl StatefulWidget for CommitDetail<'_> {
     type State = CommitDetailState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
+        if !self.show_actions {
+            self.render_panel(area, buf, state);
+            return;
+        }
         let [content_area, action_bar_area] =
             Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
                 .areas(area);
@@ -268,7 +382,14 @@ impl StatefulWidget for CommitDetail<'_> {
 
         let content_area_height = content_scroll_area.height as usize;
         self.update_state(state, value_lines.len(), content_area_height);
-        state.ensure_selected_visible(changes_start);
+        state.content_top = content_scroll_area.y;
+        state.changes_start = changes_start;
+        // File index -> line, through the rows (tree view adds directory rows).
+        let rows = change_rows(self.changes, self.tree());
+        let file_line = |file: usize| {
+            changes_start + rows.iter().position(|r| r.file == Some(file)).unwrap_or(0)
+        };
+        state.ensure_selected_visible(file_line(state.selected_file));
 
         label_lines = label_lines.into_iter().skip(state.offset).collect();
         value_lines = value_lines.into_iter().skip(state.offset).collect();
@@ -276,7 +397,7 @@ impl StatefulWidget for CommitDetail<'_> {
         // Highlight hovered file (mouse) or keyboard-selected file
         let highlight_file = state.hover_file.unwrap_or(state.selected_file);
         if !self.changes.is_empty() {
-            let selected_line = changes_start + highlight_file;
+            let selected_line = file_line(highlight_file);
             let visible_selected = selected_line.saturating_sub(state.offset);
             if visible_selected < value_lines.len() {
                 value_lines[visible_selected].style =
@@ -297,6 +418,158 @@ impl StatefulWidget for CommitDetail<'_> {
             state.pending_avatar_delete_row = state.avatar_row.take();
         }
         self.render_action_bar(action_bar_area, buf, state);
+    }
+}
+
+impl CommitDetail<'_> {
+    /// Layout beside the diff pane: a compact header on top, the changed
+    /// files below with their own scroll.
+    fn render_panel(self, area: Rect, buf: &mut Buffer, state: &mut CommitDetailState) {
+        let block = Block::default()
+            .borders(Borders::TOP)
+            .style(Style::default().fg(self.ctx.color_theme.divider_fg));
+        let inner = Block::default()
+            .padding(Padding::horizontal(1))
+            .inner(block.inner(area));
+        block.render(area, buf);
+        let width = inner.width.max(1);
+        let wrapped_height = |lines: &[Line]| -> u16 {
+            lines
+                .iter()
+                .map(|l| (l.width().max(1) as u16).div_ceil(width))
+                .sum()
+        };
+
+        let info = self.compact_info_lines();
+        let rows = change_rows(self.changes, self.tree());
+        // The files get the rows they need; the header / message gets what
+        // is left, and at least 2/5 when the files don't fit anyway.
+        let body_h = inner.height.saturating_sub(1);
+        let left_for_info = body_h.saturating_sub(rows.len() as u16);
+        let info_h = wrapped_height(&info)
+            .min(left_for_info.max((body_h * 2 / 5).max(3)))
+            .min(body_h);
+        let [info_area, divider_area, files_area] = Layout::vertical([
+            Constraint::Length(info_h),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .areas(inner);
+
+        // Explicit colour: unstyled spans inherit the block's divider colour.
+        let text = Style::default().fg(self.ctx.color_theme.fg);
+        Paragraph::new(info)
+            .style(text)
+            .wrap(Wrap { trim: false })
+            .render(info_area, buf);
+        // "── Changes (N) ───"
+        let theme = &self.ctx.color_theme;
+        let (label_style, rule_style) = (
+            Style::default().fg(theme.detail_label_fg),
+            Style::default().fg(theme.divider_fg),
+        );
+        let label = format!(" Changes ({}) ", self.changes.len());
+        let rest = (divider_area.width as usize).saturating_sub(label.chars().count() + 2);
+        Paragraph::new(Line::from(vec![
+            Span::styled("──", rule_style),
+            Span::styled(label, label_style),
+            Span::styled("─".repeat(rest), rule_style),
+        ]))
+        .render(divider_area, buf);
+
+        let file_line = |file: usize| rows.iter().position(|r| r.file == Some(file)).unwrap_or(0);
+        let mut lines = self.changes_lines();
+        self.update_state(state, lines.len(), files_area.height as usize);
+        state.content_top = files_area.y;
+        state.changes_start = 0;
+        state.ensure_selected_visible(file_line(state.selected_file));
+        let highlight_file = state.hover_file.unwrap_or(state.selected_file);
+        if let Some(line) = lines.get_mut(file_line(highlight_file)) {
+            if !self.changes.is_empty() {
+                line.style = Style::default().add_modifier(Modifier::REVERSED);
+            }
+        }
+        let visible: Vec<Line> = lines.into_iter().skip(state.offset).collect();
+        Paragraph::new(visible).style(text).render(files_area, buf);
+
+        // No avatar in this layout: drop one placed by the wide layout.
+        if let Some(row) = state.avatar_row.take() {
+            state.pending_avatar_delete_row = Some(row);
+        }
+    }
+
+    /// Subject, author and date, short SHA / parents / refs, then the body.
+    fn compact_info_lines(&self) -> Vec<Line<'_>> {
+        let mut message = self.commit_message_lines().into_iter();
+        let mut lines: Vec<Line> = message.next().into_iter().collect();
+        if !self.commit.author_name.is_empty() {
+            let mut spans = self.author_line("").spans;
+            spans.push(Span::raw("  "));
+            spans.extend(self.author_date_line().spans);
+            lines.push(Line::from(spans));
+
+            let mut spans = vec![self
+                .commit
+                .commit_hash
+                .as_short_hash()
+                .fg(self.ctx.color_theme.detail_hash_fg)];
+            if has_parent(self.commit) {
+                spans.push(Span::raw("  parent ").fg(self.ctx.color_theme.detail_label_fg));
+                spans.extend(self.parents_line().spans);
+            }
+            if has_refs(self.refs) {
+                spans.push(Span::raw("  "));
+                spans.extend(self.refs_line().spans);
+            }
+            lines.push(Line::from(spans));
+        }
+        lines.extend(message);
+        lines
+    }
+
+    /// The git actions as one `key label` row, in the actions column's order.
+    pub fn actions_hint_line(&self) -> Line<'static> {
+        let actions = if self.is_stash() {
+            STASH_ACTIONS
+        } else {
+            commit_actions(self.is_head_commit)
+        };
+        let mut spans = Vec::new();
+        for (label, event) in actions {
+            let key = self.action_key(*event);
+            if key.is_empty() {
+                continue;
+            }
+            if !spans.is_empty() {
+                spans.push(Span::raw("  "));
+            }
+            spans.push(Span::styled(
+                key,
+                Style::default()
+                    .fg(self.ctx.color_theme.fg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                format!(" {label}"),
+                Style::default().fg(self.ctx.color_theme.detail_label_fg),
+            ));
+        }
+        Line::from(spans)
+    }
+
+    /// Bound key of a git action. Revert uses its [scope.detail] binding
+    /// (`v` is `clean_untracked` globally).
+    fn action_key(&self, event: crate::event::UserEvent) -> String {
+        let mut key = self.ctx.keybind.primary_global_key(event);
+        if key.is_empty() {
+            if let Some(scoped_name) = scoped_action_name(event) {
+                key = self
+                    .ctx
+                    .keybind
+                    .primary_scoped_key(&["detail"], scoped_name);
+            }
+        }
+        key
     }
 }
 
@@ -428,21 +701,7 @@ impl CommitDetail<'_> {
                 style = style.fg(c).add_modifier(Modifier::BOLD);
             }
             let key_style = style.add_modifier(Modifier::BOLD);
-            // Most actions resolve through the global keymap. Revert is
-            // an exception, `v` is bound globally to `clean_untracked`
-            // (uncommitted view) and re-scoped to `revert` in
-            // [scope.detail]; we fall through to the scoped lookup when
-            // the global one comes up empty so the panel still surfaces
-            // the actual bound key.
-            let mut key = self.ctx.keybind.primary_global_key(*event);
-            if key.is_empty() {
-                if let Some(scoped_name) = scoped_action_name(*event) {
-                    key = self
-                        .ctx
-                        .keybind
-                        .primary_scoped_key(&["detail"], scoped_name);
-                }
-            }
+            let key = self.action_key(*event);
             let mut spans = vec![Span::styled(effective_label.to_string(), style)];
             if !key.is_empty() {
                 spans.push(Span::styled(format!(" ({})", key), key_style));
@@ -521,9 +780,8 @@ impl CommitDetail<'_> {
         // Divider before changes
         label_lines.push(Line::from(""));
         value_lines.push(self.divider_line(width as usize));
+        let changes_start = value_lines.len();
         value_lines.extend(self.changes_lines());
-
-        let changes_start = value_lines.len() - self.changes.len();
 
         (label_lines, value_lines, changes_start)
     }
@@ -733,25 +991,34 @@ impl CommitDetail<'_> {
     }
 
     fn changes_lines(&self) -> Vec<Line<'_>> {
-        self.changes
-            .iter()
-            .map(|c| {
-                let (status, path, add, del) = match c {
-                    FileChange::Add { path, additions } => ("A", path.as_str(), *additions, 0usize),
+        change_rows(self.changes, self.tree())
+            .into_iter()
+            .map(|row| {
+                let indent = Span::raw("  ".repeat(row.depth));
+                let Some(file) = row.file else {
+                    return Line::from(vec![
+                        indent,
+                        Span::styled(
+                            format!("▾ {}/", row.name),
+                            Style::default().fg(self.ctx.color_theme.detail_label_fg),
+                        ),
+                    ]);
+                };
+                let c = &self.changes[file];
+                let path = row.name;
+                let (status, add, del) = match c {
+                    FileChange::Add { additions, .. } => ("A", *additions, 0usize),
                     FileChange::Modify {
-                        path,
                         additions,
                         deletions,
-                    } => ("M", path.as_str(), *additions, *deletions),
-                    FileChange::Delete { path, deletions } => {
-                        ("D", path.as_str(), 0usize, *deletions)
-                    }
+                        ..
+                    } => ("M", *additions, *deletions),
+                    FileChange::Delete { deletions, .. } => ("D", 0usize, *deletions),
                     FileChange::Move {
-                        from: _,
-                        to,
                         additions,
                         deletions,
-                    } => ("R", to.as_str(), *additions, *deletions),
+                        ..
+                    } => ("R", *additions, *deletions),
                 };
                 let add_str = if add > 0 {
                     format!(" +{add}")
@@ -778,6 +1045,7 @@ impl CommitDetail<'_> {
                     Style::default().fg(self.ctx.color_theme.fg)
                 };
                 Line::from(vec![
+                    indent,
                     Span::styled(format!("{} ", status), Style::default().fg(status_color)),
                     Span::styled(path, path_style),
                     add_str.fg(self.ctx.color_theme.detail_file_change_add_fg),
@@ -866,6 +1134,43 @@ mod tests {
         assert!(labels.contains("Author"));
         assert!(values.contains("Alice"));
         assert!(values.contains("alice@example.com"));
+    }
+
+    fn modify(path: &str) -> FileChange {
+        FileChange::Modify {
+            path: path.into(),
+            additions: 1,
+            deletions: 1,
+        }
+    }
+
+    #[test]
+    fn tree_rows_list_dirs_first_and_merge_single_child_dirs() {
+        let mut changes = vec![
+            modify("README.md"),
+            modify("src/a/b/deep.c"),
+            modify("src/main.c"),
+            modify("include/x.h"),
+        ];
+        sort_changes_for_tree(&mut changes);
+        let rows: Vec<(Option<usize>, usize, String)> = change_rows(&changes, true)
+            .into_iter()
+            .map(|r| (r.file, r.depth, r.name))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (None, 0, "include".into()),
+                (Some(0), 1, "x.h".into()),
+                (None, 0, "src".into()),
+                (None, 1, "a/b".into()),
+                (Some(1), 2, "deep.c".into()),
+                (Some(2), 1, "main.c".into()),
+                (Some(3), 0, "README.md".into()),
+            ]
+        );
+        // Sorted changes follow the rows, so file index order is screen order.
+        assert_eq!(change_path(&changes[1]), "src/a/b/deep.c");
     }
 
     #[test]

@@ -20,8 +20,12 @@ mod refs;
 pub mod tag_detail;
 pub mod uncommitted;
 mod user_command;
+mod workspace;
 
 pub use views::*;
+
+pub(crate) use detail::DetailPreview;
+pub(crate) use workspace::{MainAreas, Workspace};
 
 pub(crate) fn adaptive_detail_height(
     area_height: u16,

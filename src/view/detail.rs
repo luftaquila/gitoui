@@ -8,14 +8,337 @@ use ratatui::{
 
 use crate::{
     app::AppContext,
+    config::DetailFileView,
     event::{AppEvent, DialogKind, Sender, UserEvent, UserEventWithCount},
-    git::{Commit, CommitHash, CommitType, FileChange, Ref, Repository},
-    view::{ListRefreshViewContext, RefreshViewContext},
+    git::{diff::DiffEntry, Commit, CommitHash, CommitType, FileChange, Ref, Repository},
+    view::{
+        diff::DiffView,
+        workspace::{main_areas, MainAreas},
+        ListRefreshViewContext, RefreshViewContext,
+    },
     widget::{
-        commit_detail::{CommitDetail, CommitDetailState},
+        commit_detail::{
+            change_path, change_rows, sort_changes_for_tree, CommitDetail, CommitDetailState,
+        },
         commit_list::{CommitList, CommitListState},
     },
 };
+
+/// Commit list on top, detail panel below. Shared by the Detail view and
+/// the List view's preview, so switching keeps the list in place.
+pub(crate) fn split_list_detail(ctx: &AppContext, area: Rect) -> [Rect; 2] {
+    let detail_height =
+        crate::view::adaptive_detail_height(area.height, ctx.ui_config.detail.height, 5);
+    Layout::vertical([Constraint::Min(0), Constraint::Length(detail_height)]).areas(area)
+}
+
+/// Delete Kitty graph placements left on rows the moved panel now covers.
+pub(crate) fn clear_rows_under(ctx: &AppContext, area: Rect, cleared: &mut Option<Rect>) {
+    if *cleared != Some(area) {
+        for y in area.top()..area.bottom() {
+            let _ = ctx.image_protocol.delete_row(y);
+        }
+        *cleared = Some(area);
+    }
+}
+
+/// Changes in the order the configured file view lists them.
+pub(crate) fn arrange_changes(ctx: &AppContext, mut changes: Vec<FileChange>) -> Vec<FileChange> {
+    if ctx.ui_config.detail.file_view == DetailFileView::Tree {
+        sort_changes_for_tree(&mut changes);
+    }
+    changes
+}
+
+fn file_at_line(
+    ctx: &AppContext,
+    changes: &[FileChange],
+    line: usize,
+    start: usize,
+) -> Option<usize> {
+    let tree = ctx.ui_config.detail.file_view == DetailFileView::Tree;
+    change_rows(changes, tree)
+        .get(line.checked_sub(start)?)
+        .and_then(|r| r.file)
+}
+
+/// The selected file's diff beside the changed files (`[ui.detail] diff_pane`).
+#[derive(Debug, Default)]
+pub(crate) struct DiffPane<'a> {
+    /// Commit and file index the view below was built for.
+    key: Option<(CommitHash, usize)>,
+    view: Option<DiffView<'a>>,
+    /// Where the last render drew it.
+    area: Option<Rect>,
+}
+
+impl<'a> DiffPane<'a> {
+    /// Rebuild the diff when the commit or the file changed. For the
+    /// uncommitted row it is index + work tree against HEAD.
+    fn sync(
+        &mut self,
+        ctx: &Rc<AppContext>,
+        tx: &Sender,
+        commit: &Commit,
+        changes: &[FileChange],
+        selected: usize,
+    ) {
+        let key = (commit.commit_hash.clone(), selected);
+        if self.key.as_ref() == Some(&key) {
+            return;
+        }
+        self.key = Some(key);
+        self.view = changes.get(selected).and_then(|change| {
+            let path = change_path(change);
+            if crate::git::diff::is_binary_extension(path) {
+                return None;
+            }
+            let uncommitted = commit.commit_type == CommitType::Uncommitted;
+            let (entry, hash) = if uncommitted {
+                let entry = match change {
+                    FileChange::Add { .. } => DiffEntry::load_untracked_file(&ctx.repo_path, path)
+                        .ok()
+                        .or_else(|| {
+                            DiffEntry::load_combined_uncommitted_for_file(&ctx.repo_path, path, 3)
+                                .ok()
+                                .flatten()
+                        }),
+                    _ => DiffEntry::load_combined_uncommitted_for_file(&ctx.repo_path, path, 3)
+                        .ok()
+                        .flatten(),
+                }?;
+                (entry, String::new())
+            } else {
+                let hash = commit.commit_hash.as_str();
+                let entry = DiffEntry::load_for_file(&ctx.repo_path, hash, path).ok()?;
+                (entry, hash.to_string())
+            };
+            let all_files = changes
+                .iter()
+                .map(|c| (change_path(c).to_string(), false))
+                .collect();
+            Some(DiffView::new(
+                None,
+                vec![entry],
+                ctx.clone(),
+                tx.clone(),
+                format!("Diff: {path}"),
+                hash,
+                all_files,
+                ctx.repo_path.clone(),
+            ))
+        });
+    }
+
+    fn render(&mut self, f: &mut Frame, area: Rect) {
+        self.area = Some(area);
+        if let Some(view) = self.view.as_mut() {
+            view.render(f, area);
+        }
+    }
+
+    fn scroll(&mut self, event_with_count: UserEventWithCount, key: KeyEvent) {
+        if let Some(view) = self.view.as_mut() {
+            view.handle_event(event_with_count, key);
+        }
+    }
+}
+
+/// Wheel over a detail panel scrolls the part under the pointer.
+fn wheel_panel(
+    col: u16,
+    row: u16,
+    down: bool,
+    info_area: Option<Rect>,
+    state: &mut CommitDetailState,
+    diff: &mut DiffPane<'_>,
+) -> bool {
+    use ratatui::{
+        crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
+        layout::Position,
+    };
+    let pos = Position::new(col, row);
+    if diff.area.is_some_and(|a| a.contains(pos)) {
+        let (event, code) = if down {
+            (UserEvent::ScrollDown, KeyCode::Down)
+        } else {
+            (UserEvent::ScrollUp, KeyCode::Up)
+        };
+        diff.scroll(
+            UserEventWithCount::new(event, 3),
+            KeyEvent::new(code, KeyModifiers::NONE),
+        );
+        return true;
+    }
+    if info_area.is_some_and(|a| a.contains(pos)) {
+        for _ in 0..3 {
+            if down {
+                state.scroll_down();
+            } else {
+                state.scroll_up();
+            }
+        }
+        return true;
+    }
+    false
+}
+
+/// `[commit info / files, diff]` of a detail panel with the diff pane.
+pub(crate) fn split_panel(area: Rect) -> [Rect; 2] {
+    Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).areas(area)
+}
+
+/// Commit info and files, plus the selected file's diff with `diff_pane`.
+/// Returns the info / files area.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_detail_panel(
+    f: &mut Frame,
+    area: Rect,
+    ctx: &Rc<AppContext>,
+    tx: &Sender,
+    widget: CommitDetail<'_>,
+    commit: &Commit,
+    changes: &[FileChange],
+    state: &mut CommitDetailState,
+    diff: &mut DiffPane<'_>,
+) -> Rect {
+    if !ctx.ui_config.detail.diff_pane {
+        diff.area = None;
+        f.render_stateful_widget(widget, area, state);
+        return area;
+    }
+    // Git actions as one row across the panel's bottom.
+    let hint = widget.actions_hint_line();
+    let [main_area, hint_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+    let [info_area, diff_area] = split_panel(main_area);
+    f.render_stateful_widget(widget.with_actions(false), info_area, state);
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(hint).block(
+            ratatui::widgets::Block::default().padding(ratatui::widgets::Padding::horizontal(1)),
+        ),
+        hint_area,
+    );
+    diff.sync(ctx, tx, commit, changes, state.selected_file);
+    diff.render(f, diff_area);
+    info_area
+}
+
+/// The `[ui.detail] preview` panel's content for the highlighted row.
+#[derive(Debug)]
+pub(crate) struct DetailPreview<'a> {
+    pub commit: Commit,
+    changes: Vec<FileChange>,
+    refs: Vec<Ref>,
+    head_branch_name: Option<String>,
+    is_head_commit: bool,
+    state: CommitDetailState,
+    diff: DiffPane<'a>,
+    info_area: Option<Rect>,
+}
+
+impl<'a> DetailPreview<'a> {
+    pub fn new(
+        ctx: &AppContext,
+        commit: Commit,
+        changes: Vec<FileChange>,
+        refs: Vec<Ref>,
+        head_branch_name: Option<String>,
+        head_commit_hash: Option<CommitHash>,
+    ) -> Self {
+        let is_head_commit = head_commit_hash.as_ref() == Some(&commit.commit_hash);
+        DetailPreview {
+            commit,
+            changes: arrange_changes(ctx, changes),
+            refs,
+            head_branch_name,
+            is_head_commit,
+            state: CommitDetailState::default(),
+            diff: DiffPane::default(),
+            info_area: None,
+        }
+    }
+
+    /// Preview of the uncommitted row (`hash` is its id), diffs against HEAD.
+    pub fn uncommitted(
+        ctx: &AppContext,
+        hash: CommitHash,
+        changes: &crate::git::status::UncommittedChanges,
+    ) -> Self {
+        use crate::git::status::StatusType;
+        let mut files: Vec<FileChange> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for f in changes.staged.iter().chain(&changes.unstaged) {
+            if !seen.insert(f.path.clone()) {
+                continue;
+            }
+            let path = f.path.clone();
+            files.push(match f.status {
+                StatusType::Added => FileChange::Add { path, additions: 0 },
+                StatusType::Deleted => FileChange::Delete { path, deletions: 0 },
+                StatusType::Renamed => FileChange::Move {
+                    from: f.old_path.clone().unwrap_or_default(),
+                    to: path,
+                    additions: 0,
+                    deletions: 0,
+                },
+                _ => FileChange::Modify {
+                    path,
+                    additions: 0,
+                    deletions: 0,
+                },
+            });
+        }
+        for f in &changes.untracked {
+            if seen.insert(f.path.clone()) {
+                files.push(FileChange::Add {
+                    path: f.path.clone(),
+                    additions: 0,
+                });
+            }
+        }
+        let commit = Commit {
+            commit_hash: hash,
+            commit_message: format!("Uncommitted Changes ({})", files.len()),
+            commit_type: CommitType::Uncommitted,
+            ..Commit::default()
+        };
+        Self::new(ctx, commit, files, Vec::new(), None, None)
+    }
+
+    pub fn render(&mut self, f: &mut Frame, area: Rect, ctx: &Rc<AppContext>, tx: &Sender) {
+        let widget = CommitDetail::new(
+            &self.commit,
+            &self.changes,
+            &self.refs,
+            ctx.clone(),
+            self.head_branch_name.clone(),
+            self.is_head_commit,
+        );
+        self.info_area = Some(render_detail_panel(
+            f,
+            area,
+            ctx,
+            tx,
+            widget,
+            &self.commit,
+            &self.changes,
+            &mut self.state,
+            &mut self.diff,
+        ));
+    }
+
+    pub fn handle_wheel(&mut self, col: u16, row: u16, down: bool) -> bool {
+        wheel_panel(
+            col,
+            row,
+            down,
+            self.info_area,
+            &mut self.state,
+            &mut self.diff,
+        )
+    }
+}
 
 #[derive(Debug)]
 pub struct DetailView<'a> {
@@ -35,6 +358,10 @@ pub struct DetailView<'a> {
     tx: Sender,
     list_height: usize,
     detail_area: Option<Rect>,
+    /// Info / files part of `detail_area` (all of it without the diff pane).
+    info_area: Option<Rect>,
+    diff_pane: DiffPane<'a>,
+    cleared_detail_area: Option<Rect>,
 }
 
 impl<'a> DetailView<'a> {
@@ -52,7 +379,7 @@ impl<'a> DetailView<'a> {
             commit_list_state: Some(commit_list_state),
             commit_detail_state: CommitDetailState::default(),
             commit,
-            changes,
+            changes: arrange_changes(&ctx, changes),
             refs,
             head_branch_name,
             head_commit_hash,
@@ -61,6 +388,9 @@ impl<'a> DetailView<'a> {
             tx,
             list_height: 0,
             detail_area: None,
+            info_area: None,
+            diff_pane: DiffPane::default(),
+            cleared_detail_area: None,
         }
     }
 
@@ -100,6 +430,25 @@ impl<'a> DetailView<'a> {
             self.tx.send(AppEvent::OpenDialog(DialogKind::Revert {
                 target: self.commit.commit_hash.as_str().into(),
             }));
+            return;
+        }
+
+        let diff_pane = self.ctx.ui_config.detail.diff_pane;
+
+        // With the diff pane, paging scrolls the diff; the file list
+        // follows the selection.
+        if diff_pane
+            && matches!(
+                event,
+                UserEvent::PageDown
+                    | UserEvent::PageUp
+                    | UserEvent::HalfPageDown
+                    | UserEvent::HalfPageUp
+                    | UserEvent::ScrollDown
+                    | UserEvent::ScrollUp
+            )
+        {
+            self.diff_pane.scroll(event_with_count, key);
             return;
         }
 
@@ -320,11 +669,14 @@ impl<'a> DetailView<'a> {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
-        let [list_area, detail_area] = self.split_areas(area);
+        let areas = self.layout(area);
+        let detail_area = areas.panel.unwrap_or(areas.list);
         self.detail_area = Some(detail_area);
 
-        let commit_list = CommitList::new(self.ctx.clone());
-        f.render_stateful_widget(commit_list, list_area, self.as_mut_list_state());
+        let ctx = self.ctx.clone();
+        let list_state = self.commit_list_state.as_mut().unwrap();
+        let commit_list = CommitList::new(ctx.clone());
+        f.render_stateful_widget(commit_list, areas.list, list_state);
 
         let commit_detail = CommitDetail::new(
             &self.commit,
@@ -335,11 +687,26 @@ impl<'a> DetailView<'a> {
             self.is_head_commit(),
         )
         .with_pr_origin(self.pr_origin);
-        f.render_stateful_widget(commit_detail, detail_area, &mut self.commit_detail_state);
+        let info_area = render_detail_panel(
+            f,
+            detail_area,
+            &self.ctx,
+            &self.tx,
+            commit_detail,
+            &self.commit,
+            &self.changes,
+            &mut self.commit_detail_state,
+            &mut self.diff_pane,
+        );
+        self.info_area = Some(info_area);
     }
 
     pub fn update_layout(&mut self, area: Rect) {
-        let [list_area, _] = self.split_areas(area);
+        let areas = self.layout(area);
+        let list_area = areas.list;
+        if let Some(detail_area) = areas.panel {
+            clear_rows_under(&self.ctx, detail_area, &mut self.cleared_detail_area);
+        }
         self.list_height = list_area.height as usize;
         self.as_mut_list_state()
             .update_height(list_area.height as usize);
@@ -365,7 +732,7 @@ impl<'a> DetailView<'a> {
         self.commit_list_state.take().unwrap()
     }
 
-    fn as_mut_list_state(&mut self) -> &mut CommitListState<'a> {
+    pub fn as_mut_list_state(&mut self) -> &mut CommitListState<'a> {
         self.commit_list_state.as_mut().unwrap()
     }
 
@@ -388,10 +755,9 @@ impl<'a> DetailView<'a> {
         self.as_list_state().graph_image_ids_sorted()
     }
 
-    fn split_areas(&self, area: Rect) -> [Rect; 2] {
-        let detail_height =
-            crate::view::adaptive_detail_height(area.height, self.ctx.ui_config.detail.height, 5);
-        Layout::vertical([Constraint::Min(0), Constraint::Length(detail_height)]).areas(area)
+    /// The List view's layout with its preview panel.
+    fn layout(&self, area: Rect) -> MainAreas {
+        main_areas(&self.ctx, area, true)
     }
 
     pub fn select_older_commit(&mut self, repository: &Repository) {
@@ -416,7 +782,7 @@ impl<'a> DetailView<'a> {
         let (commit, changes) = repository.commit_detail(&selected);
         let refs = repository.refs(&selected).into_iter().cloned().collect();
         self.commit = commit;
-        self.changes = changes;
+        self.changes = arrange_changes(&self.ctx, changes);
         self.refs = refs;
 
         self.commit_detail_state.select_first();
@@ -458,30 +824,29 @@ impl<'a> DetailView<'a> {
             return;
         }
 
-        // Check if click is in action bar area (right 40%)
-        let action_bar_x = detail_area.x + (detail_area.width as f32 * 0.6) as u16;
-        if col >= action_bar_x {
-            let action_bar_row = (row - detail_y).saturating_sub(4);
-            if let Some(action_idx) = self.action_index_at_row(action_bar_row) {
-                self.execute_action(action_idx);
+        if self.ctx.ui_config.detail.diff_pane {
+            // Diff pane on the right: nothing clickable there yet.
+            if self.info_area.is_some_and(|a| col >= a.right()) {
+                return;
             }
-            return;
+        } else {
+            // Check if click is in action bar area (right 40%)
+            let action_bar_x = detail_area.x + (detail_area.width as f32 * 0.6) as u16;
+            if col >= action_bar_x {
+                let action_bar_row = (row - detail_y).saturating_sub(4);
+                if let Some(action_idx) = self.action_index_at_row(action_bar_row) {
+                    self.execute_action(action_idx);
+                }
+                return;
+            }
         }
 
-        // Detail widget layout: separator(0) + title(1) + underline(2) + spacer(3) + content(4+)
-        let detail_local_row = row - detail_y;
-        if detail_local_row < 4 {
-            return;
-        }
-
-        let content_row = detail_local_row - 4;
-        let clicked_line = self.commit_detail_state.offset() + content_row;
-        let changes_start = self.compute_changes_start_line();
-
-        if clicked_line >= changes_start && clicked_line < changes_start + self.changes.len() {
-            let file_idx = clicked_line - changes_start;
+        if let Some(file_idx) = self.file_at_row(row as u16) {
             self.commit_detail_state.selected_file = file_idx;
-            self.open_selected_file_diff();
+            // With the diff pane the click already shows the diff beside.
+            if !self.ctx.ui_config.detail.diff_pane {
+                self.open_selected_file_diff();
+            }
         }
     }
 
@@ -510,8 +875,20 @@ impl<'a> DetailView<'a> {
             return;
         }
 
-        // Check if hover is in action bar area (right 40%)
-        let action_bar_x = detail_area.x + (detail_area.width as f32 * 0.6) as u16;
+        // Check if hover is in action bar area (right 40%), or in the diff
+        // pane when that replaces the action bar.
+        let action_bar_x = if self.ctx.ui_config.detail.diff_pane {
+            self.info_area
+                .map(|a| a.right())
+                .unwrap_or(detail_area.right())
+        } else {
+            detail_area.x + (detail_area.width as f32 * 0.6) as u16
+        };
+        if col >= action_bar_x && self.ctx.ui_config.detail.diff_pane {
+            freeze_selection(&mut self.commit_detail_state);
+            self.commit_detail_state.hovered_action = None;
+            return;
+        }
         if col >= action_bar_x {
             let action_bar_row = (row - detail_y).saturating_sub(4);
             self.commit_detail_state.hovered_action = self.action_index_at_row(action_bar_row);
@@ -521,22 +898,23 @@ impl<'a> DetailView<'a> {
             self.commit_detail_state.hovered_action = None;
         }
 
-        let detail_local_row = row - detail_y;
-        // Detail widget layout: separator(0) + title(1) + underline(2) + spacer(3) + content(4+)
-        if detail_local_row < 4 {
-            freeze_selection(&mut self.commit_detail_state);
-            return;
-        }
-
-        let content_row = detail_local_row - 4;
-        let hover_line = self.commit_detail_state.offset() + content_row;
-        let changes_start = self.compute_changes_start_line();
-
-        if hover_line >= changes_start && hover_line < changes_start + self.changes.len() {
-            self.commit_detail_state.hover_file = Some(hover_line - changes_start);
+        if let Some(file_idx) = self.file_at_row(row as u16) {
+            self.commit_detail_state.hover_file = Some(file_idx);
         } else {
             freeze_selection(&mut self.commit_detail_state);
         }
+    }
+
+    /// Wheel scrolls the panel part under the pointer; false off-panel.
+    pub fn handle_wheel(&mut self, col: u16, row: u16, down: bool) -> bool {
+        wheel_panel(
+            col,
+            row,
+            down,
+            self.info_area,
+            &mut self.commit_detail_state,
+            &mut self.diff_pane,
+        )
     }
 
     fn action_index_at_row(&self, action_bar_row: usize) -> Option<usize> {
@@ -724,36 +1102,10 @@ impl<'a> DetailView<'a> {
         }
     }
 
-    fn compute_changes_start_line(&self) -> usize {
-        let mut count = 0;
-        count += 2; // author name + date
-        if self.commit.author_name != self.commit.committer_name
-            || self.commit.author_email != self.commit.committer_email
-            || self.commit.author_date != self.commit.committer_date
-        {
-            count += 2; // committer name + date
-        }
-        count += 1; // SHA
-        if !self.commit.parent_commit_hashes.is_empty() {
-            count += 1; // Parents
-        }
-        if self.refs.iter().any(|r| {
-            matches!(
-                r,
-                Ref::Branch { .. } | Ref::RemoteBranch { .. } | Ref::Tag { .. }
-            )
-        }) {
-            count += 1; // Refs
-        }
-        count += 1; // divider
-        count += 1; // commit message (subject)
-                    // Body lines come straight after the subject, no separator row
-                    // since commit_message_lines() stopped pushing one. Counting an
-                    // empty line here used to push hover detection 1 row off.
-        if !self.commit.body.is_empty() {
-            count += self.commit.body.lines().count();
-        }
-        count += 1; // divider before changes
-        count
+    /// Changed file at screen `row`, from the rows the last render laid out.
+    fn file_at_row(&self, row: u16) -> Option<usize> {
+        let state = &self.commit_detail_state;
+        let line = state.content_line_at(row)?;
+        file_at_line(&self.ctx, &self.changes, line, state.changes_start())
     }
 }
