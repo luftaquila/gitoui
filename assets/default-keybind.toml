@@ -121,6 +121,9 @@ focus_down = ["ctrl-j"]
 focus_up = ["ctrl-k"]
 focus_right = ["ctrl-l"]
 
+# Detail panel: open the selected file's diff full screen
+zoom_diff = ["shift-z"]
+
 # Abort in-progress rebase/merge/cherry-pick
 abort_operation = ["ctrl-a"]
 

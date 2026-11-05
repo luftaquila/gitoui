@@ -169,7 +169,7 @@ impl<'a> DiffPane<'a> {
                 .iter()
                 .map(|c| (change_path(c).to_string(), false))
                 .collect();
-            Some(DiffView::new(
+            let mut view = DiffView::new(
                 None,
                 vec![entry],
                 ctx.clone(),
@@ -178,13 +178,16 @@ impl<'a> DiffPane<'a> {
                 hash,
                 all_files,
                 ctx.repo_path.clone(),
-            ))
+            );
+            view.enable_cursor();
+            Some(view)
         });
     }
 
-    fn render(&mut self, f: &mut Frame, area: Rect) {
+    fn render(&mut self, f: &mut Frame, area: Rect, focused: bool) {
         self.area = Some(area);
         if let Some(view) = self.view.as_mut() {
+            view.show_cursor(focused);
             view.render(f, area);
         }
     }
@@ -193,6 +196,20 @@ impl<'a> DiffPane<'a> {
         if let Some(view) = self.view.as_mut() {
             view.handle_event(event_with_count, key);
         }
+    }
+
+    fn click(&mut self, col: u16, row: u16) -> bool {
+        self.view.as_mut().is_some_and(|v| v.click_line(col, row))
+    }
+
+    fn move_cursor(&mut self, event: UserEvent, count: usize) -> bool {
+        self.view
+            .as_mut()
+            .is_some_and(|v| v.move_cursor(event, count))
+    }
+
+    fn expand_at_cursor(&mut self) -> bool {
+        self.view.as_mut().is_some_and(|v| v.expand_at_cursor())
     }
 }
 
@@ -277,7 +294,7 @@ pub(crate) fn render_detail_panel(
         hint_area,
     );
     diff.sync(ctx, tx, commit, changes, state.selected_file);
-    diff.render(f, diff_area);
+    diff.render(f, diff_area, focus == PanelFocus::Diff);
     if focus == PanelFocus::Diff && diff.view.is_some() {
         // The diff's top rule, accented while the diff has focus.
         let accent = ratatui::style::Style::default()
@@ -521,7 +538,7 @@ impl<'a> DetailView<'a> {
         let diff_pane = self.ctx.ui_config.detail.diff_pane;
         if diff_pane && self.focus == PanelFocus::Diff {
             match event {
-                // Moving and jumping act on the diff while it has focus.
+                // j/k, pages, g/G move the cursor line.
                 UserEvent::NavigateDown
                 | UserEvent::NavigateUp
                 | UserEvent::GoToTop
@@ -529,10 +546,21 @@ impl<'a> DetailView<'a> {
                 | UserEvent::PageDown
                 | UserEvent::PageUp
                 | UserEvent::HalfPageDown
-                | UserEvent::HalfPageUp
-                | UserEvent::ScrollDown
-                | UserEvent::ScrollUp => {
+                | UserEvent::HalfPageUp => {
+                    if !self.diff_pane.move_cursor(event, count) {
+                        self.diff_pane.scroll(event_with_count, key);
+                    }
+                    return;
+                }
+                // Ctrl-e / Ctrl-y and the wheel scroll the view.
+                UserEvent::ScrollDown | UserEvent::ScrollUp => {
                     self.diff_pane.scroll(event_with_count, key);
+                    return;
+                }
+                // Enter expands the gap under the cursor (`zoom_diff` opens
+                // the full diff view).
+                UserEvent::Confirm => {
+                    self.diff_pane.expand_at_cursor();
                     return;
                 }
                 UserEvent::Cancel => {
@@ -637,6 +665,14 @@ impl<'a> DetailView<'a> {
             }
             UserEvent::HelpToggle => {
                 self.tx.send(AppEvent::OpenHelp);
+            }
+            // With the diff pane, Enter on a file goes into its diff;
+            // `zoom_diff` opens it full screen.
+            UserEvent::Confirm if diff_pane && self.focus != PanelFocus::Diff => {
+                self.focus = PanelFocus::Diff;
+            }
+            UserEvent::ZoomDiff => {
+                self.open_selected_file_diff();
             }
             UserEvent::Confirm => {
                 self.open_selected_file_diff();
@@ -955,9 +991,10 @@ impl<'a> DetailView<'a> {
         }
 
         if self.ctx.ui_config.detail.diff_pane {
-            // A click on the diff pane focuses it.
+            // A click on the diff pane focuses it and expands a gap there.
             if self.info_area.is_some_and(|a| col >= a.right()) {
                 self.focus = PanelFocus::Diff;
+                self.diff_pane.click(col, row as u16);
                 return;
             }
         } else {

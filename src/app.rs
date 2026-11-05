@@ -3502,8 +3502,24 @@ impl App<'_> {
                         .view
                         .diff_footer_hint()
                         .unwrap_or_else(|| format!("⌘ {}", g(UserEvent::FullCopy, "copy-path"))),
+                    View::Detail(ref view)
+                        if self.ctx.ui_config.detail.diff_pane
+                            && view.focus() == PanelFocus::Diff =>
+                    {
+                        format!(
+                            "⌘ j/k:line▕▏{}:expand show-more/unchanged▕▏{}▕▏{}▕▏{}▕▏{}/{}",
+                            g(UserEvent::Confirm, "").trim_end_matches(':'),
+                            g(UserEvent::ZoomDiff, "full diff"),
+                            g(UserEvent::Cancel, "files"),
+                            g(UserEvent::RefList, "files/diff"),
+                            g(UserEvent::PanelGrow, "taller"),
+                            g(UserEvent::PanelShrink, "shorter"),
+                        )
+                    }
                     View::Detail(_) if self.ctx.ui_config.detail.diff_pane => format!(
-                        "⌘ ⇆:prev/next▕▏{}▕▏{}/{}▕▏{}▕▏{}▕▏{}",
+                        "⌘ ⇆:prev/next▕▏{}▕▏{}▕▏{}▕▏{}/{}▕▏{}▕▏{}▕▏{}",
+                        g(UserEvent::Confirm, "diff").replace(":diff", ":into diff"),
+                        g(UserEvent::ZoomDiff, "full diff"),
                         g(UserEvent::RefList, "files/diff"),
                         g(UserEvent::PanelGrow, "taller"),
                         g(UserEvent::PanelShrink, "shorter"),

@@ -87,6 +87,13 @@ pub struct DiffView<'a> {
     /// loop distinguish "first time setup" (auto-focus first focusable) from
     /// "rebuild after user interaction" (preserve focus).
     first_build_pending: bool,
+    /// Line cursor of the detail panel's diff pane; None in the diff view.
+    cursor: Option<usize>,
+    /// Draw the cursor line (the pane has focus).
+    cursor_shown: bool,
+    /// (gap, direction, line count before) of the last expansion, to keep the
+    /// cursor on the revealed lines once they are rebuilt.
+    cursor_follow: Option<(usize, ExpandDirection, usize)>,
 }
 
 /// One concrete occurrence of the search query inside a base line.
@@ -257,6 +264,9 @@ impl<'a> DiffView<'a> {
             initial_scroll_origin: None,
             pending_restore: None,
             first_build_pending: true,
+            cursor: None,
+            cursor_shown: false,
+            cursor_follow: None,
         }
     }
 
@@ -805,7 +815,7 @@ impl<'a> DiffView<'a> {
                 } else {
                     false
                 };
-                if !restored {
+                if !restored && self.cursor.is_none() {
                     if let Some(origin) = self.initial_scroll_origin.take() {
                         if let Some(span_idx) =
                             self.hunk_spans.iter().position(|s| s.origin == origin)
@@ -854,6 +864,41 @@ impl<'a> DiffView<'a> {
         self.content_height = self.base_lines.len();
         // The viewport may have grown since the last scroll.
         self.scroll_offset = self.scroll_offset.min(self.max_scroll());
+        // Follow the pressed button: one below its gap moves down by
+        // the revealed lines.
+        if let (Some((gap, dir, old_height)), Some(cursor)) =
+            (self.cursor_follow.take(), self.cursor.as_mut())
+        {
+            match self
+                .expand_buttons
+                .iter()
+                .find(|b| b.gap_idx == gap && b.direction == dir)
+            {
+                Some(button) => *cursor = button.line_idx,
+                // The gap is used up and its button gone: go to the last
+                // revealed line.
+                None if dir == ExpandDirection::Down => {
+                    *cursor = (*cursor + self.content_height)
+                        .saturating_sub(old_height)
+                        .min(self.content_height.saturating_sub(1));
+                }
+                None => {}
+            }
+            let viewport = content_area.height as usize;
+            if *cursor >= self.scroll_offset + viewport {
+                self.scroll_offset = *cursor + 1 - viewport.max(1);
+            } else if *cursor < self.scroll_offset {
+                self.scroll_offset = *cursor;
+            }
+            self.scroll_offset = self.scroll_offset.min(self.max_scroll());
+        }
+        // The cursor stays on screen (wheel / ctrl-e scroll the view).
+        if let Some(cursor) = self.cursor {
+            let bottom = (self.scroll_offset + content_area.height as usize)
+                .min(self.content_height)
+                .saturating_sub(1);
+            self.cursor = Some(cursor.clamp(self.scroll_offset, bottom.max(self.scroll_offset)));
+        }
 
         // Build visible lines from cache, applying hover only to button lines
         let mut visible_lines: Vec<Line> = self
@@ -997,6 +1042,26 @@ impl<'a> DiffView<'a> {
                         match_bg,
                         match_fg,
                     );
+                }
+            }
+        }
+
+        // Cursor line: selection background where the line has none of
+        // its own (gutter, context lines, padding), bold text.
+        if self.cursor_shown {
+            if let Some(cursor) = self.cursor {
+                if let Some(line) = cursor
+                    .checked_sub(self.scroll_offset)
+                    .and_then(|i| visible_lines.get_mut(i))
+                {
+                    let sel = self.ctx.color_theme.list_selected_bg;
+                    for span in line.spans.iter_mut() {
+                        if span.style.bg.is_none() {
+                            span.style = span.style.bg(sel);
+                        }
+                        span.style = span.style.add_modifier(Modifier::BOLD);
+                    }
+                    line.style = line.style.bg(sel);
                 }
             }
         }
@@ -2819,6 +2884,99 @@ impl<'a> DiffView<'a> {
         if prev_hunk.is_some() {
             self.hovered_hunk = None;
             self.needs_rebuild = true;
+        }
+    }
+
+    pub fn enable_cursor(&mut self) {
+        self.cursor = Some(0);
+    }
+
+    pub fn show_cursor(&mut self, shown: bool) {
+        self.cursor_shown = shown;
+    }
+
+    /// Move the cursor for a navigation event; false if not handled.
+    pub fn move_cursor(&mut self, event: UserEvent, count: usize) -> bool {
+        let Some(cursor) = self.cursor else {
+            return false;
+        };
+        let viewport = self
+            .diff_content_area
+            .map(|a| a.height as usize)
+            .unwrap_or(0)
+            .max(1);
+        let last = self.content_height.saturating_sub(1);
+        let next = match event {
+            UserEvent::NavigateDown => cursor.saturating_add(count),
+            UserEvent::NavigateUp => cursor.saturating_sub(count),
+            UserEvent::HalfPageDown => cursor.saturating_add(viewport / 2 * count),
+            UserEvent::HalfPageUp => cursor.saturating_sub(viewport / 2 * count),
+            UserEvent::PageDown => cursor.saturating_add(viewport * count),
+            UserEvent::PageUp => cursor.saturating_sub(viewport * count),
+            UserEvent::GoToTop => 0,
+            UserEvent::GoToBottom => last,
+            _ => return false,
+        }
+        .min(last);
+        self.cursor = Some(next);
+        if next < self.scroll_offset {
+            self.scroll_offset = next;
+        } else if next >= self.scroll_offset + viewport {
+            self.scroll_offset = next + 1 - viewport;
+        }
+        self.scroll_offset = self.scroll_offset.min(self.max_scroll());
+        true
+    }
+
+    /// Expand the gap under the cursor; false if there is none.
+    pub fn expand_at_cursor(&mut self) -> bool {
+        self.cursor.is_some_and(|line| self.expand_at_line(line))
+    }
+
+    /// Cursor to the clicked line, expanding a gap there. Hunk-staging clicks
+    /// stay with `handle_click`.
+    pub fn click_line(&mut self, col: u16, row: u16) -> bool {
+        let Some(area) = self.diff_content_area else {
+            return false;
+        };
+        if !area.contains(ratatui::layout::Position::new(col, row)) {
+            return false;
+        }
+        let line = self.scroll_offset + (row - area.y) as usize;
+        if self.cursor.is_some() {
+            self.cursor = Some(line.min(self.content_height.saturating_sub(1)));
+        }
+        self.expand_at_line(line)
+    }
+
+    /// A "show more" line shows some more of its gap; the
+    /// "N lines unchanged" line next to it shows the whole gap.
+    fn expand_at_line(&mut self, line: usize) -> bool {
+        if let Some(idx) = self.expand_buttons.iter().position(|b| b.line_idx == line) {
+            let button = &self.expand_buttons[idx];
+            self.cursor_follow = Some((button.gap_idx, button.direction, self.content_height));
+            self.activate_button(idx);
+            return true;
+        }
+        let is_gap_line = self.base_lines.get(line).is_some_and(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.contains("lines unchanged"))
+        });
+        let gap = self
+            .expand_buttons
+            .iter()
+            .find(|b| b.line_idx + 1 == line || line + 1 == b.line_idx)
+            .map(|b| b.gap_idx);
+        match (is_gap_line, gap) {
+            (true, Some(gap_idx)) => {
+                if let Some(g) = self.gap_states.get_mut(gap_idx) {
+                    g.visible_up = g.total.saturating_sub(g.visible_down);
+                    self.needs_rebuild = true;
+                }
+                true
+            }
+            _ => false,
         }
     }
 

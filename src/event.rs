@@ -1175,6 +1175,8 @@ pub enum UserEvent {
     FocusDown,
     FocusUp,
     FocusRight,
+    // Detail panel: open the selected file's diff full screen
+    ZoomDiff,
     // Branch upstream
     SetUpstream,
     // Abort in-progress rebase/merge/cherry-pick
@@ -1302,6 +1304,7 @@ impl<'de> Deserialize<'de> for UserEvent {
                         "focus_down" => Ok(UserEvent::FocusDown),
                         "focus_up" => Ok(UserEvent::FocusUp),
                         "focus_right" => Ok(UserEvent::FocusRight),
+                        "zoom_diff" => Ok(UserEvent::ZoomDiff),
                         "set_upstream" => Ok(UserEvent::SetUpstream),
                         "abort_operation" => Ok(UserEvent::AbortOperation),
                         "amend_commit" => Ok(UserEvent::AmendCommit),
