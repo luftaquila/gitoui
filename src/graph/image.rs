@@ -63,7 +63,8 @@ impl GraphImageManager {
         image_width_mode: GraphImageWidthMode,
         image_protocol: ImageProtocol,
     ) -> Self {
-        let image_params = ImageParams::new(graph_color_set, cell_width_type);
+        let image_params =
+            ImageParams::new(graph_color_set, cell_width_type).fit_terminal_cells(cell_width_type);
         let drawing_pixels = DrawingPixels::new(&image_params);
 
         GraphImageManager {
@@ -98,6 +99,35 @@ impl GraphImageManager {
 
     pub fn prepared_image(&self, commit_hash: &CommitHash) -> Option<&PreparedImage> {
         self.prepared_image_map.get(commit_hash)
+    }
+
+    /// Cells a commit's graph row takes, computed from the topology when its
+    /// image is not built yet.
+    pub fn row_cell_width(&self, commit_hash: &CommitHash) -> usize {
+        if let Some(image) = self.prepared_image_map.get(commit_hash) {
+            return image.cell_width();
+        }
+        let Some(&(pos_x, pos_y)) = self.graph.commit_pos_map.get(commit_hash) else {
+            return 0;
+        };
+        let edges = self
+            .graph
+            .edges
+            .get(pos_y)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let cell_count = row_max_pos_x(
+            &self.graph,
+            self.graph_style,
+            self.image_width_mode,
+            pos_x,
+            pos_y,
+            edges,
+        ) + 1;
+        match self.cell_width_type {
+            CellWidthType::Double => cell_count * 2,
+            CellWidthType::Single => cell_count,
+        }
     }
 
     /// Raw PNG bytes of a commit's graph row. Used by the horizontal-scroll
@@ -192,7 +222,8 @@ impl GraphImageManager {
             return;
         }
         self.cell_width_type = cell_width_type;
-        self.image_params = ImageParams::new(graph_color_set, cell_width_type);
+        self.image_params =
+            ImageParams::new(graph_color_set, cell_width_type).fit_terminal_cells(cell_width_type);
         self.drawing_pixels = DrawingPixels::new(&self.image_params);
         self.clear_prepared_images();
     }
@@ -362,6 +393,34 @@ impl ImageParams {
         }
     }
 
+    /// Size a lane at exactly twice the terminal cell's pixels, so every row
+    /// image scales by the same 1/2 and no letterboxing shifts lanes between
+    /// rows. Keeps the defaults when the terminal reports no pixel size.
+    fn fit_terminal_cells(mut self, cell_width_type: CellWidthType) -> Self {
+        let Ok(ws) = ratatui::crossterm::terminal::window_size() else {
+            return self;
+        };
+        if ws.columns == 0 || ws.rows == 0 {
+            return self;
+        }
+        let (cell_w, cell_h) = (ws.width / ws.columns, ws.height / ws.rows);
+        if cell_w == 0 || cell_h == 0 {
+            return self;
+        }
+        let lane_cells = match cell_width_type {
+            CellWidthType::Double => 2,
+            CellWidthType::Single => 1,
+        };
+        let (old_h, new_h) = (self.height as u32, cell_h as u32 * 2);
+        let scale = |v: u16| ((v as u32 * new_h + old_h / 2) / old_h).max(1) as u16;
+        self.line_width = scale(self.line_width);
+        self.circle_inner_radius = scale(self.circle_inner_radius);
+        self.circle_outer_radius = scale(self.circle_outer_radius);
+        self.width = cell_w * 2 * lane_cells;
+        self.height = cell_h * 2;
+        self
+    }
+
     fn edge_color(&self, index: usize) -> image::Rgba<u8> {
         self.edge_colors[index % self.edge_colors.len()]
     }
@@ -372,6 +431,32 @@ impl ImageParams {
         } else {
             self.height / 2
         }
+    }
+}
+
+/// Rightmost lane drawn on row `pos_y`. Smooth draws only
+/// `branch_segments`, so its width comes from them, not from `edges`
+/// (whose merge detours can sit further right).
+fn row_max_pos_x(
+    graph: &Graph,
+    graph_style: GraphStyle,
+    image_width_mode: GraphImageWidthMode,
+    pos_x: usize,
+    pos_y: usize,
+    edges: &[Edge],
+) -> usize {
+    match image_width_mode {
+        GraphImageWidthMode::Compact if graph_style == GraphStyle::Smooth => graph
+            .branch_segments
+            .iter()
+            .filter(|s| {
+                s.target_pos_y.min(s.source_pos_y) <= pos_y
+                    && pos_y <= s.target_pos_y.max(s.source_pos_y)
+            })
+            .map(|s| s.source_pos_x.max(s.target_pos_x))
+            .fold(pos_x, usize::max),
+        GraphImageWidthMode::Compact => edges.iter().map(|e| e.pos_x).fold(pos_x, usize::max),
+        GraphImageWidthMode::Fixed => graph.max_pos_x,
     }
 }
 
@@ -456,10 +541,7 @@ pub fn build_single_graph_row_image(
             Some((unco_x, head_pos_y, UNCOMMITTED_COLOR))
         });
 
-    let max_pos_x = match image_width_mode {
-        GraphImageWidthMode::Compact => edges.iter().map(|e| e.pos_x).fold(pos_x, usize::max),
-        GraphImageWidthMode::Fixed => graph.max_pos_x,
-    };
+    let max_pos_x = row_max_pos_x(graph, graph_style, image_width_mode, pos_x, pos_y, edges);
 
     let cell_count = max_pos_x + 1;
 

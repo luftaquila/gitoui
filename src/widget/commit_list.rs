@@ -373,6 +373,9 @@ pub struct CommitListState<'a> {
     // render so we can skip re-rendering graph image cells when nothing
     // visible has changed.
     graph_render_state: Option<(usize, usize, Rect, u16)>,
+    // Per visible row: cells the marker / message are pulled left to start
+    // right after that row's own lanes. Empty when compaction is off.
+    graph_row_shifts: Vec<u16>,
     // Horizontal scroll offset (in graph cells) for the lane viewport.
     // Only matters when the native graph is wider than the column cap
     // (40 % of panel) - the visible portion of the lanes slides via
@@ -459,6 +462,7 @@ impl<'a> CommitListState<'a> {
             hovered_tag: None,
             hovered_row: None,
             graph_render_state: None,
+            graph_row_shifts: Vec::new(),
             graph_scroll_x: 0,
             last_graph_area_cells: 0,
             avatar_stable_key: None,
@@ -469,6 +473,32 @@ impl<'a> CommitListState<'a> {
 
     pub fn graph_area_cell_width(&self) -> u16 {
         self.graph_cell_width + 1 // right pad
+    }
+
+    /// Graph cells used by visible row `i` (0 if the row is not on screen).
+    fn visible_row_graph_cells(&self, i: usize) -> u16 {
+        self.commits
+            .get(self.offset + i)
+            .map(|c| {
+                self.graph_image_manager
+                    .row_cell_width(&c.commit.commit_hash) as u16
+            })
+            .unwrap_or(0)
+    }
+
+    /// Graph column width for the rows on screen, not the whole history.
+    fn visible_graph_area_cell_width(&self) -> u16 {
+        (0..self
+            .height
+            .min(self.commits.len().saturating_sub(self.offset)))
+            .map(|i| self.visible_row_graph_cells(i))
+            .max()
+            .unwrap_or(0)
+            + 1 // right pad
+    }
+
+    fn graph_row_shift(&self, i: usize) -> u16 {
+        self.graph_row_shifts.get(i).copied().unwrap_or(0)
     }
 
     /// Native lane count of the graph (in cells). Used to clamp
@@ -1852,7 +1882,9 @@ impl<'a> StatefulWidget for CommitList<'a> {
                 .collect()
         };
 
-        let widths = self.content_column_widths(commits_area.width, state, avatars_enabled);
+        let compact_graph = self.compact_graph(&columns);
+        let widths =
+            self.content_column_widths(commits_area.width, state, avatars_enabled, compact_graph);
         let constraints = calc_cell_widths(
             commits_area.width,
             self.ctx.ui_config.list.commit_message_min_width,
@@ -1860,6 +1892,21 @@ impl<'a> StatefulWidget for CommitList<'a> {
             &columns,
         );
         let chunks = Layout::horizontal(constraints).split(commits_area);
+
+        // Pull each row's marker / message left onto its own last lane.
+        // Horizontal graph scroll keeps the plain column layout.
+        state.graph_row_shifts.clear();
+        if compact_graph && state.graph_scroll_x == 0 {
+            if let Some(g) = columns
+                .iter()
+                .position(|c| matches!(c, UserListColumnType::Graph))
+            {
+                let max_w = chunks[g].width.saturating_sub(1);
+                state.graph_row_shifts = (0..state.height)
+                    .map(|i| max_w - state.visible_row_graph_cells(i).min(max_w))
+                    .collect();
+            }
+        }
 
         for (i, col) in columns.iter().enumerate() {
             match col {
@@ -1963,11 +2010,30 @@ fn format_thousands(n: usize) -> String {
 }
 
 impl CommitList<'_> {
+    /// Image-rendered graph directly followed (markers aside) by the
+    /// commit message: rows can be packed against their own lanes.
+    fn compact_graph(&self, columns: &[UserListColumnType]) -> bool {
+        if self.ctx.core_config.graph_renderer().is_ascii() {
+            return false;
+        }
+        let Some(g) = columns
+            .iter()
+            .position(|c| matches!(c, UserListColumnType::Graph))
+        else {
+            return false;
+        };
+        columns[g + 1..]
+            .iter()
+            .find(|c| !matches!(c, UserListColumnType::Marker))
+            .is_some_and(|c| matches!(c, UserListColumnType::CommitMessage))
+    }
+
     fn content_column_widths(
         &self,
         area_width: u16,
         state: &CommitListState,
         avatars_enabled: bool,
+        compact_graph: bool,
     ) -> CommitListColumnWidths {
         let avatar_width = if avatars_enabled { 3 } else { 0 };
         // Use the cached longest-author width (O(1)) instead of
@@ -2016,8 +2082,13 @@ impl CommitList<'_> {
         // into view. Floor at 8 cells so the graph always shows
         // something useful even on tiny terminals.
         let graph_cap = (area_width * 40 / 100).max(8);
+        let graph_width = if compact_graph {
+            state.visible_graph_area_cell_width()
+        } else {
+            state.graph_area_cell_width()
+        };
         CommitListColumnWidths {
-            graph: state.graph_area_cell_width().min(area_width).min(graph_cap),
+            graph: graph_width.min(area_width).min(graph_cap),
             author: author_column_width_from_cached(area_width, avatar_width, author_content_width),
             hash: 9,
             date: date_column_width(&dates),
@@ -2048,7 +2119,8 @@ impl CommitList<'_> {
                 .cloned()
                 .collect()
         };
-        let widths = self.content_column_widths(area.width, state, avatars_enabled);
+        let compact_graph = self.compact_graph(&columns);
+        let widths = self.content_column_widths(area.width, state, avatars_enabled, compact_graph);
         let constraints = calc_cell_widths(
             area.width,
             self.ctx.ui_config.list.commit_message_min_width,
@@ -2093,9 +2165,11 @@ impl CommitList<'_> {
             // Visible commits and graph area unchanged: write skip cells so ratatui never
             // emits escape sequences for graph positions. Terminal retains the previous render.
             let max_graph_width = area.width.saturating_sub(1) as usize;
-            let pad_x = area.left() + max_graph_width as u16;
             for i in 0..state.height.min(area.height as usize) {
                 let y = area.top() + i as u16;
+                // Only this row's own lanes are image cells; the rest of the
+                // column belongs to the shifted marker / message.
+                let pad_x = area.left() + max_graph_width as u16 - state.graph_row_shift(i);
                 let _is_selected = state.is_visual_selected(i)
                     && state.hovered_branch.is_none()
                     && state.hovered_tag.is_none();
@@ -2307,7 +2381,7 @@ impl CommitList<'_> {
                         cell.set_skip(image_cell.skip());
                     }
                     // Pad cell keeps the app background, selection starts at the │ marker
-                    let pad_x = area.left() + max_graph_width as u16;
+                    let pad_x = area.left() + max_graph_width as u16 - state_ref.graph_row_shift(i);
                     if pad_x < area.right() {
                         let cell = &mut buf[(pad_x, y)];
                         cell.set_symbol(" ");
@@ -2346,7 +2420,7 @@ impl CommitList<'_> {
                 }
             })
             .collect();
-        Widget::render(List::new(items), area, buf)
+        render_shifted_rows(items, area, state, false, buf);
     }
 
     fn render_commit_message(
@@ -2391,8 +2465,13 @@ impl CommitList<'_> {
                 state.hovered_tag.as_deref(),
             );
 
+            // The row is drawn `shift` cells further left, and gains that
+            // much width at the right end.
+            let shift = state.graph_row_shift(i);
+            let max_width = max_width + shift as usize;
+
             // Store hit areas with absolute positions
-            let base_x = area.x + 1; // +1 for leading space in to_commit_list_item
+            let base_x = area.x - shift + 1; // +1 for leading space in to_commit_list_item
             for hit in hit_areas {
                 state.ref_hit_areas.push(RefHitArea {
                     row: area.y + i as u16,
@@ -2470,7 +2549,7 @@ impl CommitList<'_> {
             }
             items.push(self.to_commit_list_item(i, spans, state));
         }
-        Widget::render(List::new(items), area, buf);
+        render_shifted_rows(items, area, state, true, buf);
     }
 
     fn render_name(
@@ -2881,6 +2960,28 @@ impl CommitList<'_> {
                 .fg(self.ctx.color_theme.list_selected_fg);
         }
         ListItem::new(line)
+    }
+}
+
+/// Render one item per visible row, pulled `graph_row_shift(i)` cells left
+/// so it starts right after that row's own graph lanes. With `extend` the
+/// row also grows by the shift, so it still ends at `area.right()`.
+fn render_shifted_rows(
+    items: Vec<ListItem<'_>>,
+    area: Rect,
+    state: &CommitListState,
+    extend: bool,
+    buf: &mut Buffer,
+) {
+    for (i, item) in items.into_iter().enumerate().take(area.height as usize) {
+        let shift = state.graph_row_shift(i).min(area.x);
+        let width = if extend {
+            area.width + shift
+        } else {
+            area.width
+        };
+        let row = Rect::new(area.x - shift, area.y + i as u16, width, 1);
+        Widget::render(List::new([item]), row, buf);
     }
 }
 
