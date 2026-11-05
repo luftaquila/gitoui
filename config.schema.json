@@ -287,6 +287,22 @@
               "type": "boolean",
               "description": "Whether to show dates in local timezone.",
               "default": true
+            },
+            "preview": {
+              "type": "boolean",
+              "description": "Keep the detail panel open under the commit list, following the highlighted commit.",
+              "default": false
+            },
+            "file_view": {
+              "type": "string",
+              "description": "How the changed files of a commit are listed.",
+              "enum": ["list", "tree"],
+              "default": "list"
+            },
+            "diff_pane": {
+              "type": "boolean",
+              "description": "Show the selected file's diff beside the changed files.",
+              "default": false
             }
           },
           "additionalProperties": false

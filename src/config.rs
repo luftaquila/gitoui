@@ -610,6 +610,23 @@ pub struct UiDetailConfig {
     #[garde(skip)]
     #[default = true]
     pub date_local: bool,
+    #[garde(skip)]
+    #[default = false]
+    pub preview: bool,
+    #[garde(skip)]
+    #[default(DetailFileView::List)]
+    pub file_view: DetailFileView,
+    #[garde(skip)]
+    #[default = false]
+    pub diff_pane: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DetailFileView {
+    #[default]
+    List,
+    Tree,
 }
 
 #[optional(derives = [Deserialize])]
