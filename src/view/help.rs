@@ -532,6 +532,11 @@ fn sections(kb: &KeyBinds) -> Vec<HelpSection> {
                     UserEvent::FocusRight,
                     "Window on the right (list / diff)",
                 ),
+                sg(
+                    kb,
+                    UserEvent::ZoomDiff,
+                    "Detail: selected file's diff full screen",
+                ),
                 sg(kb, UserEvent::SelectMiddle, "Select middle of viewport"),
                 sg(kb, UserEvent::SelectBottom, "Select bottom of viewport"),
                 sg(kb, UserEvent::ScrollDown, "Scroll one line down"),
