@@ -626,6 +626,17 @@ pub struct UiRefsConfig {
     #[garde(range(min = 1))]
     #[default = 36]
     pub width: u16,
+    #[garde(skip)]
+    #[default(RefsPosition::Right)]
+    pub position: RefsPosition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RefsPosition {
+    Left,
+    #[default]
+    Right,
 }
 
 #[optional(derives = [Deserialize])]

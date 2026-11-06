@@ -8,6 +8,7 @@ use ratatui::{
 
 use crate::{
     app::AppContext,
+    config::RefsPosition,
     event::{AppEvent, DialogKind, Sender, UserEvent, UserEventWithCount},
     git::{actions, Ref},
     view::{ListRefreshViewContext, RefreshViewContext, RefsRefreshViewContext},
@@ -302,7 +303,17 @@ impl<'a> RefsView<'a> {
         let cap = self.ctx.ui_config.refs.width;
         let area_cap = area.width.saturating_sub(graph_width);
         let refs_width = natural.clamp(MIN_WIDTH, cap).min(area_cap);
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(refs_width)]).areas(area)
+        match self.ctx.ui_config.refs.position {
+            RefsPosition::Right => {
+                Layout::horizontal([Constraint::Min(0), Constraint::Length(refs_width)]).areas(area)
+            }
+            RefsPosition::Left => {
+                let [refs_area, list_area] =
+                    Layout::horizontal([Constraint::Length(refs_width), Constraint::Min(0)])
+                        .areas(area);
+                [list_area, refs_area]
+            }
+        }
     }
 
     fn update_commit_list_selected(&mut self) {
