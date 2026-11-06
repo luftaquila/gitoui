@@ -5575,6 +5575,7 @@ impl<'a> App<'a> {
             let commit_list_state = view.take_list_state();
             let refs = self.repository.all_refs().into_iter().cloned().collect();
             self.view = View::of_refs(commit_list_state, refs, self.ctx.clone(), self.ec.sender());
+            self.reset_graph_images_if_refs_left();
         }
     }
 
@@ -5588,6 +5589,17 @@ impl<'a> App<'a> {
             // render so the visible window's avatars catch up.
             commit_list_state.invalidate_visible_avatars();
             self.view = View::of_list(commit_list_state, self.ctx.clone(), self.ec.sender());
+            self.reset_graph_images_if_refs_left();
+        }
+    }
+
+    /// A left refs panel shifts the commit list sideways: drop the graph
+    /// image placements so none stay at the old columns.
+    fn reset_graph_images_if_refs_left(&mut self) {
+        if self.ctx.ui_config.refs.position == crate::config::RefsPosition::Left {
+            let graph_ids = self.view.graph_image_ids_sorted();
+            let _ = self.ctx.image_protocol.delete_images(&graph_ids);
+            self.view.clear_graph_images();
         }
     }
 

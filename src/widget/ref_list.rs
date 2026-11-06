@@ -10,7 +10,7 @@ use ratatui::{
 use semver::Version;
 use tui_tree_widget::{Tree, TreeItem, TreeState};
 
-use crate::{app::AppContext, color::ColorTheme, git::Ref};
+use crate::{app::AppContext, color::ColorTheme, config::RefsPosition, git::Ref};
 
 const TREE_BRANCH_ROOT_IDENT: &str = "__branches__";
 const TREE_REMOTE_ROOT_IDENT: &str = "__remotes__";
@@ -237,7 +237,11 @@ impl StatefulWidget for RefList {
             )
             .block(
                 Block::default()
-                    .borders(Borders::LEFT)
+                    // Divider on the side that faces the commit list.
+                    .borders(match self.ctx.ui_config.refs.position {
+                        RefsPosition::Right => Borders::LEFT,
+                        RefsPosition::Left => Borders::RIGHT,
+                    })
                     .style(Style::default().fg(self.ctx.color_theme.divider_fg))
                     .padding(Padding::horizontal(1)),
             );

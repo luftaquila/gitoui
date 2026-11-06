@@ -311,6 +311,12 @@
               "type": "integer",
               "description": "The width of the refs list area.",
               "default": 26
+            },
+            "position": {
+              "type": "string",
+              "description": "Which side of the commit list the refs list opens on.",
+              "enum": ["left", "right"],
+              "default": "right"
             }
           },
           "additionalProperties": false
