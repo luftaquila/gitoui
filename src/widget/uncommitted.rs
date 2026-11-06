@@ -135,6 +135,42 @@ impl UncommittedState {
         }
     }
 
+    /// First file in `select_next_global` order.
+    pub fn select_first_global(
+        &mut self,
+        staged_len: usize,
+        unstaged_len: usize,
+        untracked_len: usize,
+    ) {
+        let sections = [
+            (UncommittedSection::Staged, staged_len),
+            (UncommittedSection::Unstaged, unstaged_len),
+            (UncommittedSection::Untracked, untracked_len),
+        ];
+        if let Some((section, _)) = sections.into_iter().find(|&(_, len)| len > 0) {
+            self.section = section;
+            self.selected = 0;
+        }
+    }
+
+    /// Last file in `select_next_global` order.
+    pub fn select_last_global(
+        &mut self,
+        staged_len: usize,
+        unstaged_len: usize,
+        untracked_len: usize,
+    ) {
+        let sections = [
+            (UncommittedSection::Staged, staged_len),
+            (UncommittedSection::Unstaged, unstaged_len),
+            (UncommittedSection::Untracked, untracked_len),
+        ];
+        if let Some((section, len)) = sections.into_iter().rev().find(|&(_, len)| len > 0) {
+            self.section = section;
+            self.selected = len - 1;
+        }
+    }
+
     pub fn switch_section_forward(
         &mut self,
         staged_len: usize,
@@ -633,5 +669,50 @@ impl<'a> UncommittedWidget<'a> {
 
         let paragraph = Paragraph::new(lines).style(Style::default().fg(self.ctx.color_theme.fg));
         paragraph.render(action_inner, buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_first_and_last_global_skip_empty_sections() {
+        let mut state = UncommittedState {
+            section: UncommittedSection::Unstaged,
+            selected: 1,
+            ..Default::default()
+        };
+
+        // Staged is empty: the first file is in Unstaged.
+        state.select_first_global(0, 3, 2);
+        assert_eq!(state.section, UncommittedSection::Unstaged);
+        assert_eq!(state.selected, 0);
+
+        state.select_last_global(0, 3, 2);
+        assert_eq!(state.section, UncommittedSection::Untracked);
+        assert_eq!(state.selected, 1);
+
+        // Untracked is empty: the last file is in Unstaged.
+        state.select_last_global(4, 3, 0);
+        assert_eq!(state.section, UncommittedSection::Unstaged);
+        assert_eq!(state.selected, 2);
+
+        state.select_first_global(4, 3, 0);
+        assert_eq!(state.section, UncommittedSection::Staged);
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn select_first_and_last_global_keep_selection_without_files() {
+        let mut state = UncommittedState {
+            section: UncommittedSection::Staged,
+            selected: 0,
+            ..Default::default()
+        };
+        state.select_first_global(0, 0, 0);
+        state.select_last_global(0, 0, 0);
+        assert_eq!(state.section, UncommittedSection::Staged);
+        assert_eq!(state.selected, 0);
     }
 }

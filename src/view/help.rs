@@ -683,6 +683,7 @@ fn sections(kb: &KeyBinds) -> Vec<HelpSection> {
             shortcuts: vec![
                 lit("Esc", "Back to commit list"),
                 lit("Up / Down", "Navigate files within the active section"),
+                lit("g / Shift+G", "First / last file"),
                 lit(
                     "Left / Right",
                     "Switch section (Unstaged / Staged / Untracked)",
