@@ -1252,7 +1252,10 @@ impl App<'_> {
                         self.invalidate_header();
                     }
                     AppEvent::Mouse(mouse) => {
-                        needs_draw = self.handle_mouse_event(mouse, terminal)?;
+                        let wants_draw = self.handle_mouse_event(mouse, terminal)?;
+                        // A no-op event later in the batch (a click's release)
+                        // must not cancel an earlier event's redraw.
+                        needs_draw = wants_draw || (drained > 0 && needs_draw);
                         if let Some(req) = self.pending_refresh.take() {
                             // A handler (currently: dir-input dropdown 2nd-click)
                             // asked for a full app rebuild. Mirror the keyboard
