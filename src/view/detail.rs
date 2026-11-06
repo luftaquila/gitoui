@@ -572,6 +572,11 @@ impl<'a> DetailView<'a> {
         self.pr_origin = origin;
     }
 
+    /// The commit comes from a pull request: the commit list is not drawn.
+    pub fn is_pr_commit(&self) -> bool {
+        self.pr_origin.is_some()
+    }
+
     /// Pre-select the file whose path matches in the commit's change list.
     /// Used when arriving from Blame / FileHistory so the user lands directly
     /// on the file they were inspecting, `ensure_selected_visible` (run on
