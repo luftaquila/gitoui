@@ -80,6 +80,20 @@ impl<'a> UncommittedView<'a> {
                     );
                 }
             }
+            UserEvent::GoToTop => {
+                self.state.select_first_global(
+                    self.staged.len(),
+                    self.unstaged.len(),
+                    self.untracked.len(),
+                );
+            }
+            UserEvent::GoToBottom => {
+                self.state.select_last_global(
+                    self.staged.len(),
+                    self.unstaged.len(),
+                    self.untracked.len(),
+                );
+            }
             UserEvent::ScrollDown => {
                 for _ in 0..count {
                     self.state.scroll_down();
