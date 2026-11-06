@@ -368,6 +368,8 @@ pub struct App<'a> {
     pending_refresh: Option<RefreshRequest>,
     /// Dragging the detail panel's top edge.
     panel_drag: bool,
+    /// (time, col, row) of the last left click.
+    last_click: Option<(std::time::Instant, u16, u16)>,
     /// Closing the branch / tag detail returns to the refs tree.
     detail_from_refs: bool,
     /// Transient "this dir isn't a git repo" message shown in the footer
@@ -415,6 +417,7 @@ struct NavBurst {
 const AUTO_REFRESH_THROTTLE: std::time::Duration = std::time::Duration::from_secs(2);
 
 const NAV_BURST_GAP: std::time::Duration = std::time::Duration::from_millis(200);
+const DOUBLE_CLICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 /// Two-tier acceleration ramp so a sustained hold ramps up gently
 /// instead of jumping straight to a teleport. First tier kicks in
 /// quickly so the user feels the speed change while they're still
@@ -680,6 +683,7 @@ impl<'a> App<'a> {
             dir_input_cursor_anchor: None,
             pending_refresh: None,
             panel_drag: false,
+            last_click: None,
             detail_from_refs: false,
             dir_error_message: None,
             pr_nav_stack: Vec::new(),
@@ -6578,6 +6582,21 @@ impl<'a> App<'a> {
                 if self.view.on_panel_edge(mouse.column, mouse.row) {
                     self.panel_drag = true;
                     return Ok(true);
+                }
+                let double_click = self.last_click.is_some_and(|(at, col, row)| {
+                    col == mouse.column && row == mouse.row && at.elapsed() < DOUBLE_CLICK_INTERVAL
+                });
+                self.last_click = if double_click {
+                    None
+                } else {
+                    Some((std::time::Instant::now(), mouse.column, mouse.row))
+                };
+                // Double-click on a commit's SHA copies it, as `short_copy` does.
+                if double_click {
+                    if let Some(hash) = self.view.commit_hash_at(mouse.column, mouse.row) {
+                        self.copy_to_clipboard("Commit SHA".into(), hash.as_str().into());
+                        return Ok(true);
+                    }
                 }
                 // Focus the clicked window first, then let it take the click.
                 if let Some(target) = self.window_at(mouse.column, mouse.row) {

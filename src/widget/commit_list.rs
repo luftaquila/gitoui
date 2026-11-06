@@ -365,6 +365,8 @@ pub struct CommitListState<'a> {
     default_regex: bool,
 
     pub ref_hit_areas: Vec<RefHitArea>,
+    /// SHA column of the last render.
+    hash_area: Option<Rect>,
     pub hovered_branch: Option<String>,
     pub hovered_tag: Option<String>,
     pub hovered_row: Option<usize>,
@@ -460,6 +462,7 @@ impl<'a> CommitListState<'a> {
             default_fuzzy,
             default_regex,
             ref_hit_areas: Vec::new(),
+            hash_area: None,
             hovered_branch: None,
             hovered_tag: None,
             hovered_row: None,
@@ -1433,6 +1436,20 @@ impl<'a> CommitListState<'a> {
         })
     }
 
+    pub fn commit_hash_at_position(&self, col: u16, row: u16) -> Option<&CommitHash> {
+        let area = self.hash_area?;
+        if col < area.left() || col >= area.right() || row < area.top() || row >= area.bottom() {
+            return None;
+        }
+        let info = self
+            .commits
+            .get(self.offset + (row - area.top()) as usize)?;
+        if info.is_uncommitted {
+            return None;
+        }
+        Some(&info.commit.commit_hash)
+    }
+
     pub fn set_hovered_branch(&mut self, branch: Option<String>) {
         self.hovered_branch = branch;
     }
@@ -1828,6 +1845,7 @@ impl<'a> StatefulWidget for CommitList<'a> {
         }
 
         state.ref_hit_areas.clear();
+        state.hash_area = None;
 
         // Compute once per render, avoids 4 separate mutex lock/unlock cycles
         let avatars_enabled = self.ctx.avatar_manager.lock().unwrap().is_enabled();
@@ -1945,6 +1963,7 @@ impl<'a> StatefulWidget for CommitList<'a> {
                     self.render_name(buf, chunks[i], state, avatars_enabled);
                 }
                 UserListColumnType::Hash => {
+                    state.hash_area = Some(chunks[i]);
                     self.render_hash(buf, chunks[i], state);
                 }
                 UserListColumnType::Date => {

@@ -533,6 +533,19 @@ impl<'a> View<'a> {
         list_state.workspace.areas
     }
 
+    pub fn commit_hash_at(&self, col: u16, row: u16) -> Option<crate::git::CommitHash> {
+        let list_state = match self {
+            View::List(view) => view.as_list_state(),
+            View::Refs(view) => view.as_list_state(),
+            View::Detail(view) => view.as_list_state(),
+            View::BranchDetail(view) => view.list_state()?,
+            View::TagDetail(view) => view.list_state()?,
+            View::UserCommand(view) => view.as_list_state(),
+            _ => return None,
+        };
+        list_state.commit_hash_at_position(col, row).cloned()
+    }
+
     /// Wheel over a detail panel scrolls the part under the pointer; false
     /// falls back to the usual scroll event.
     pub fn handle_wheel(&mut self, col: u16, row: u16, down: bool) -> bool {

@@ -600,6 +600,7 @@ fn sections(kb: &KeyBinds) -> Vec<HelpSection> {
                 lit("Copy", ""),
                 sg(kb, UserEvent::FullCopy, "Copy commit message"),
                 sg(kb, UserEvent::ShortCopy, "Copy commit hash"),
+                lit("Double-click SHA", "Copy commit hash"),
             ],
         },
         HelpSection {
