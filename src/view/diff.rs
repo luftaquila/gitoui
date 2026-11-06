@@ -852,6 +852,8 @@ impl<'a> DiffView<'a> {
             }
         }
         self.content_height = self.base_lines.len();
+        // The viewport may have grown since the last scroll.
+        self.scroll_offset = self.scroll_offset.min(self.max_scroll());
 
         // Build visible lines from cache, applying hover only to button lines
         let mut visible_lines: Vec<Line> = self
@@ -2563,8 +2565,18 @@ impl<'a> DiffView<'a> {
         Ok(())
     }
 
+    /// Last offset that keeps the viewport full.
+    fn max_scroll(&self) -> usize {
+        let viewport = self
+            .diff_content_area
+            .map(|a| a.height as usize)
+            .unwrap_or(0)
+            .max(1);
+        self.content_height.saturating_sub(viewport)
+    }
+
     fn scroll_down(&mut self) {
-        let max = self.content_height.saturating_sub(1);
+        let max = self.max_scroll();
         if self.scroll_offset < max {
             self.scroll_offset += 1;
         }
@@ -2576,7 +2588,7 @@ impl<'a> DiffView<'a> {
 
     fn scroll_page_down(&mut self) {
         let page = 20;
-        let max = self.content_height.saturating_sub(1);
+        let max = self.max_scroll();
         self.scroll_offset = (self.scroll_offset + page).min(max);
     }
 
@@ -2587,7 +2599,7 @@ impl<'a> DiffView<'a> {
 
     fn scroll_half_page_down(&mut self) {
         let half = 10;
-        let max = self.content_height.saturating_sub(1);
+        let max = self.max_scroll();
         self.scroll_offset = (self.scroll_offset + half).min(max);
     }
 
@@ -2597,8 +2609,7 @@ impl<'a> DiffView<'a> {
     }
 
     fn scroll_to_bottom(&mut self) {
-        let max = self.content_height.saturating_sub(1);
-        self.scroll_offset = max;
+        self.scroll_offset = self.max_scroll();
     }
 
     fn copy_file_path(&self) {
